@@ -1,0 +1,24 @@
+{
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:frontend": "vite",
+    "dev:all": "powershell -ExecutionPolicy Bypass -File ./scripts/start-dev.ps1",
+    "dev:backend": "python ./backend/app_web.py",
+    "build": "vite build",
+    "preview": "vite preview",
+    "serve": "vite",
+    "locations:sync": "node ./backend/scripts/sync-locations.mjs",
+    "firestore:list": "node ./backend/scripts/firestore-tools.mjs list",
+    "firestore:get:company": "node ./backend/scripts/firestore-tools.mjs get Company"
+  },
+  "dependencies": {
+    "firebase": "^12.11.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.0.2",
+    "vite": "^7.1.7"
+  }
+}

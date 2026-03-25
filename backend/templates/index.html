@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WithCue Data Collection</title>
+  <style>
+    :root {
+      --bg-deep: #071427;
+      --panel: rgba(5, 18, 36, 0.92);
+      --line: rgba(89, 213, 255, 0.34);
+      --teal: #74f5e3;
+      --text: #eef8ff;
+      --muted: #9dc4df;
+      --danger: #ff9fb3;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "SUIT", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 20% 20%, rgba(40, 117, 201, 0.22), transparent 18%),
+        radial-gradient(circle at 80% 18%, rgba(61, 201, 255, 0.15), transparent 20%),
+        linear-gradient(180deg, #0a1a31 0%, var(--bg-deep) 100%);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+      background-size: 48px 48px;
+      opacity: 0.35;
+    }
+
+    .shell {
+      width: min(1120px, 96vw);
+      background:
+        radial-gradient(circle at top center, rgba(41, 112, 194, 0.18), transparent 28%),
+        var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 30px;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .stage {
+      padding: 32px;
+      display: grid;
+      gap: 22px;
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+    }
+
+    .topbar__left {
+      display: grid;
+      gap: 10px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.8rem;
+    }
+
+    .lead {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .meta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--teal);
+      font-weight: 700;
+      font-size: 0.92rem;
+    }
+
+    .participant-inline {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    select,
+    option {
+      color: var(--text);
+      background: rgba(6, 23, 43, 0.98);
+    }
+
+    select {
+      width: 100%;
+      padding: 16px;
+      border: 1px solid rgba(95, 202, 255, 0.24);
+      border-radius: 16px;
+      font-size: 1rem;
+    }
+
+    .preview {
+      width: 100%;
+      border-radius: 22px;
+      overflow: hidden;
+      background: #000;
+      aspect-ratio: 16 / 9;
+      border: 1px solid rgba(95, 202, 255, 0.18);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+    }
+
+    .preview video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      background: #000;
+    }
+
+    .part-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 16px;
+      padding: 16px 20px;
+      background: linear-gradient(90deg, rgba(22, 181, 255, 0.88), rgba(63, 224, 255, 0.88));
+      color: #02111f;
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: rgba(12, 35, 64, 0.78);
+      border-color: var(--line);
+      color: var(--text);
+    }
+
+    .part-btn {
+      font-size: 1.15rem;
+      padding: 22px 16px;
+      background: rgba(12, 35, 64, 0.86);
+      border-color: rgba(95, 202, 255, 0.22);
+      color: var(--text);
+    }
+
+    .part-btn:hover {
+      border-color: rgba(116, 245, 227, 0.8);
+    }
+
+    .part-btn:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+      filter: none;
+    }
+
+    .notice {
+      min-height: 24px;
+      color: var(--danger);
+      font-weight: 600;
+    }
+
+    @media (max-width: 720px) {
+      .stage {
+        padding: 22px;
+      }
+
+      .part-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .topbar {
+        flex-direction: column;
+        align-items: stretch;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="stage">
+      <div class="topbar">
+        <div class="topbar__left">
+          <h1>데이터 수집</h1>
+          <p class="lead">지점과 로그인 정보가 자동으로 반영된 촬영 화면입니다. 카메라를 선택하면 바로 프리뷰가 보이고, 부위를 선택하면 녹화가 시작됩니다.</p>
+          <div class="meta-row">
+            <div class="chip">수집 위치: <span id="site-label"></span></div>
+            <div class="participant-inline">
+              <div class="chip">이름: <span id="participant-name"></span></div>
+              <div class="chip">성별: <span id="participant-gender"></span></div>
+              <div class="chip">생년월일: <span id="participant-birthdate"></span></div>
+            </div>
+          </div>
+        </div>
+        <button type="button" class="secondary" id="logout-button">로그아웃</button>
+      </div>
+
+      <div>
+        <label for="camera-select">카메라 선택</label>
+        <select id="camera-select"></select>
+      </div>
+
+      <div class="preview">
+        <video id="preview" autoplay muted playsinline></video>
+      </div>
+
+      <div class="part-grid">
+        <button class="part-btn" data-part="목" disabled>목</button>
+        <button class="part-btn" data-part="허리" disabled>허리</button>
+        <button class="part-btn" data-part="왼쪽 어깨" disabled>왼쪽 어깨</button>
+        <button class="part-btn" data-part="오른쪽 어깨" disabled>오른쪽 어깨</button>
+        <button class="part-btn" data-part="왼쪽 무릎" disabled>왼쪽 무릎</button>
+        <button class="part-btn" data-part="오른쪽 무릎" disabled>오른쪽 무릎</button>
+      </div>
+
+      <div id="record-status" class="notice"></div>
+    </section>
+  </main>
+
+  <script>
+    const initialState = {{ initial_state|tojson }};
+    const state = {
+      participantId: "",
+      name: initialState.name || "",
+      birthDate: initialState.birthDate || "",
+      gender: initialState.gender || "",
+      siteKey: initialState.siteKey || "aim",
+      siteLabel: initialState.siteLabel || "AIM",
+      recording: false,
+      previewStream: null,
+      browserDevices: []
+    };
+
+    const siteLabel = document.getElementById("site-label");
+    const participantName = document.getElementById("participant-name");
+    const participantGender = document.getElementById("participant-gender");
+    const participantBirthdate = document.getElementById("participant-birthdate");
+    const cameraSelect = document.getElementById("camera-select");
+    const preview = document.getElementById("preview");
+    const recordStatus = document.getElementById("record-status");
+    const partButtons = Array.from(document.querySelectorAll(".part-btn"));
+    const logoutButton = document.getElementById("logout-button");
+
+    siteLabel.textContent = state.siteLabel;
+    participantName.textContent = state.name || "-";
+    participantGender.textContent = state.gender || "-";
+    participantBirthdate.textContent = formatBirthdate(state.birthDate);
+    setPartButtonsDisabled(true);
+
+    function formatBirthdate(rawBirthdate) {
+      const numericBirthdate = String(rawBirthdate || "").replace(/\D/g, "");
+      if (numericBirthdate.length !== 8) {
+        return rawBirthdate || "-";
+      }
+      return `${numericBirthdate.slice(2, 4)}-${numericBirthdate.slice(4, 6)}-${numericBirthdate.slice(6, 8)}`;
+    }
+
+    function hasInjectedParticipant() {
+      return Boolean(state.name && state.birthDate && state.gender);
+    }
+
+    function setPartButtonsDisabled(disabled) {
+      partButtons.forEach((button) => {
+        button.disabled = disabled;
+      });
+    }
+
+    function stopPreviewStream() {
+      if (state.previewStream) {
+        state.previewStream.getTracks().forEach((track) => track.stop());
+        state.previewStream = null;
+      }
+      preview.srcObject = null;
+    }
+
+    function resetPreviewToBlack() {
+      stopPreviewStream();
+    }
+
+    async function ensureBrowserDeviceAccess() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("이 브라우저에서는 카메라 미리보기를 지원하지 않습니다.");
+      }
+
+      const tempStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      tempStream.getTracks().forEach((track) => track.stop());
+      state.browserDevices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === "videoinput");
+    }
+
+    function findBrowserDevice(selectedLabel, selectedIndex) {
+      const normalizedLabel = (selectedLabel || "").toLowerCase().trim();
+      let matchedDevice = state.browserDevices.find((device) => device.label.toLowerCase() === normalizedLabel);
+
+      if (!matchedDevice && normalizedLabel) {
+        matchedDevice = state.browserDevices.find((device) => {
+          const deviceLabel = device.label.toLowerCase();
+          return deviceLabel.includes(normalizedLabel) || normalizedLabel.includes(deviceLabel);
+        });
+      }
+
+      if (!matchedDevice) {
+        matchedDevice = state.browserDevices[selectedIndex] || state.browserDevices[0];
+      }
+
+      return matchedDevice || null;
+    }
+
+    async function startBrowserPreview() {
+      stopPreviewStream();
+
+      const selectedOption = cameraSelect.options[cameraSelect.selectedIndex];
+      const selectedLabel = selectedOption?.textContent || "";
+      const selectedIndex = Number(cameraSelect.value || 0);
+      const matchedDevice = findBrowserDevice(selectedLabel, selectedIndex);
+
+      const constraints = matchedDevice
+        ? {
+            video: {
+              deviceId: { exact: matchedDevice.deviceId },
+              width: { ideal: 640, max: 960 },
+              height: { ideal: 360, max: 540 },
+              frameRate: { ideal: 24, max: 30 }
+            },
+            audio: false
+          }
+        : {
+            video: {
+              width: { ideal: 640, max: 960 },
+              height: { ideal: 360, max: 540 },
+              frameRate: { ideal: 24, max: 30 }
+            },
+            audio: false
+          };
+
+      state.previewStream = await navigator.mediaDevices.getUserMedia(constraints);
+      const [track] = state.previewStream.getVideoTracks();
+      if (track && "contentHint" in track) {
+        track.contentHint = "motion";
+      }
+      preview.srcObject = state.previewStream;
+      await preview.play();
+    }
+
+    async function fetchCameras() {
+      cameraSelect.innerHTML = "";
+
+      const placeholderOption = document.createElement("option");
+      placeholderOption.value = "";
+      placeholderOption.textContent = "카메라를 선택해 주세요.";
+      cameraSelect.appendChild(placeholderOption);
+
+      const response = await fetch("/api/cameras");
+      const result = await response.json();
+
+      result.cameras.forEach((camera) => {
+        const option = document.createElement("option");
+        option.value = String(camera.index);
+        option.textContent = camera.label;
+        cameraSelect.appendChild(option);
+      });
+
+      if (result.cameras.length > 0) {
+        cameraSelect.disabled = false;
+        cameraSelect.value = String(result.cameras[0].index);
+        setPartButtonsDisabled(false);
+        recordStatus.textContent = "카메라가 연결되었습니다. 촬영할 부위를 선택해 주세요.";
+        await startBrowserPreview();
+      } else {
+        placeholderOption.textContent = "사용 가능한 카메라가 없습니다.";
+        cameraSelect.value = "";
+        cameraSelect.disabled = true;
+        setPartButtonsDisabled(true);
+        recordStatus.textContent = "사용 가능한 카메라를 찾지 못했습니다.";
+      }
+    }
+
+    async function ensureParticipantReady() {
+      recordStatus.textContent = "참여자 등록을 확인하는 중입니다.";
+      const response = await fetch("/api/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: state.name,
+          birth_date: state.birthDate,
+          gender: state.gender,
+          consent: "agree",
+          site_key: state.siteKey
+        })
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || "참여자 등록에 실패했습니다.");
+      }
+      state.participantId = result.participant_id;
+      recordStatus.textContent = "참여자 등록이 완료되었습니다.";
+    }
+
+    async function openRecordingCamera() {
+      const response = await fetch("/api/preview/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ camera_index: Number(cameraSelect.value) })
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || "카메라를 열지 못했습니다.");
+      }
+    }
+
+    async function startRecording(partName) {
+      await openRecordingCamera();
+
+      const response = await fetch("/api/record/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          participant_id: state.participantId,
+          part_name: partName,
+          camera_index: Number(cameraSelect.value),
+          site_key: state.siteKey
+        })
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || "녹화를 시작하지 못했습니다.");
+      }
+
+      state.recording = true;
+      setPartButtonsDisabled(true);
+      recordStatus.textContent = `${partName} 촬영 중입니다. 종료하려면 스페이스바를 눌러 주세요.`;
+    }
+
+    async function stopRecording() {
+      if (!state.recording) {
+        return;
+      }
+
+      await fetch("/api/record/stop", { method: "POST" });
+      state.recording = false;
+      setPartButtonsDisabled(false);
+      recordStatus.textContent = "녹화를 종료했습니다. 다음 부위를 선택할 수 있습니다.";
+    }
+
+    async function exitToLogin() {
+      await stopRecording();
+      stopPreviewStream();
+      window.location.replace("http://localhost:5173/?view=login");
+    }
+
+    cameraSelect.addEventListener("change", async () => {
+      if (!state.recording && cameraSelect.value) {
+        recordStatus.textContent = "선택한 카메라를 여는 중입니다.";
+        try {
+          await startBrowserPreview();
+          recordStatus.textContent = "카메라가 변경되었습니다. 촬영할 부위를 선택해 주세요.";
+        } catch (error) {
+          recordStatus.textContent = error.message;
+        }
+      }
+    });
+
+    partButtons.forEach((button) => {
+      button.addEventListener("click", async () => {
+        if (!state.participantId) {
+          recordStatus.textContent = "참여자 등록이 아직 완료되지 않았습니다. 잠시 후 다시 시도해 주세요.";
+          return;
+        }
+        if (!cameraSelect.value) {
+          recordStatus.textContent = "먼저 사용할 카메라를 선택해 주세요.";
+          return;
+        }
+
+        try {
+          await startRecording(button.dataset.part);
+        } catch (error) {
+          setPartButtonsDisabled(false);
+          recordStatus.textContent = error.message;
+        }
+      });
+    });
+
+    window.addEventListener("keydown", async (event) => {
+      if (event.code !== "Space") {
+        return;
+      }
+      event.preventDefault();
+      await stopRecording();
+    });
+
+    window.addEventListener("beforeunload", () => {
+      stopPreviewStream();
+      navigator.sendBeacon("/api/record/stop");
+    });
+
+    window.history.pushState({ page: "record" }, "", window.location.href);
+    window.addEventListener("popstate", () => {
+      window.location.replace("http://localhost:5173/?view=login");
+    });
+
+    logoutButton.addEventListener("click", async () => {
+      await exitToLogin();
+    });
+
+    async function bootstrapRecordPage() {
+      if (!hasInjectedParticipant()) {
+        window.location.replace("http://localhost:5173/?view=login");
+        return;
+      }
+
+      try {
+        await ensureParticipantReady();
+        await ensureBrowserDeviceAccess();
+        await fetchCameras();
+      } catch (error) {
+        recordStatus.textContent = error.message;
+      }
+    }
+
+    window.addEventListener("error", (event) => {
+      recordStatus.textContent = `스크립트 오류: ${event.message}`;
+    });
+
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event.reason;
+      recordStatus.textContent = `비동기 오류: ${reason?.message || reason || "알 수 없는 오류"}`;
+    });
+
+    bootstrapRecordPage();
+  </script>
+</body>
+</html>

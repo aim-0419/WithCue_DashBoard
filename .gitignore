@@ -1,0 +1,12 @@
+node_modules
+dist
+.vercel
+backend/__pycache__/
+backend/*.pyc
+backend/*.pyo
+backend/*.pyd
+backend/.env
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+Desktop/Data_Auto/
