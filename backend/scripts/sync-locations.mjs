@@ -5,7 +5,7 @@ import path from "node:path";
 import { initializeApp } from "firebase/app";
 import { doc, getFirestore, serverTimestamp, setDoc } from "firebase/firestore";
 
-import { firebaseConfig } from "../../frontend/config/firebase-config.js";
+import { firebaseConfig } from "./firebase-config.mjs";
 
 const SAVE_ROOT = path.join(os.homedir(), "Desktop", "Data_Auto");
 const PARTICIPANTS_CSV = path.join(SAVE_ROOT, "participants.csv");

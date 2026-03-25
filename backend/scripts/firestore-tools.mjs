@@ -7,7 +7,7 @@ import {
   getDocs,
   setDoc,
 } from "firebase/firestore";
-import { firebaseConfig } from "../../frontend/config/firebase-config.js";
+import { firebaseConfig } from "./firebase-config.mjs";
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
