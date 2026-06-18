@@ -160,6 +160,13 @@ service cloud.firestore {
           "MimeType",
           "FileSize",
           "DurationMs",
+          "SourceType",
+          "DepthEnabled",
+          "DepthFrameCount",
+          "DepthRawFileName",
+          "DepthIndexFileName",
+          "DepthMetadataFileName",
+          "DepthRawSize",
           "CreatedAt"
         ]) &&
         isNonEmptyString(request.resource.data.UserId) &&
@@ -179,7 +186,16 @@ service cloud.firestore {
         isNonEmptyString(request.resource.data.FileName) &&
         isNonEmptyString(request.resource.data.MimeType) &&
         request.resource.data.FileSize is int &&
-        request.resource.data.DurationMs is int;
+        request.resource.data.DurationMs is int &&
+        request.resource.data.SourceType in ["browser", "realsense"] &&
+        request.resource.data.DepthEnabled is bool &&
+        request.resource.data.DepthFrameCount is int &&
+        request.resource.data.DepthFrameCount >= 0 &&
+        request.resource.data.DepthRawFileName is string &&
+        request.resource.data.DepthIndexFileName is string &&
+        request.resource.data.DepthMetadataFileName is string &&
+        request.resource.data.DepthRawSize is int &&
+        request.resource.data.DepthRawSize >= 0;
 
       allow update, delete: if false;
     }

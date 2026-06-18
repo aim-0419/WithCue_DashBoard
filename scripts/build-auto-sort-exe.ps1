@@ -7,21 +7,40 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $EntryScript = Join-Path $PSScriptRoot "auto_sort_downloads.py"
 $OutputDir = Join-Path $ProjectRoot "release\auto-sort"
-$WorkDir = Join-Path $ProjectRoot "build\auto-sort"
+$TempBuildRoot = Join-Path ([System.IO.Path]::GetTempPath()) "withcue-auto-sort-build"
+$TempEntryScript = Join-Path $TempBuildRoot "auto_sort_downloads.py"
+$TempDistDir = Join-Path $TempBuildRoot "dist"
+$TempWorkDir = Join-Path $TempBuildRoot "work"
 
-Write-Host "자동 분류 exe 빌드를 시작함."
-Write-Host "출력 경로: $OutputDir"
+Write-Host "Starting WithCueAutoSort.exe build."
+Write-Host "Output directory: $OutputDir"
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
-New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
+
+if (Test-Path -LiteralPath $TempBuildRoot) {
+  Remove-Item -LiteralPath $TempBuildRoot -Recurse -Force
+}
+
+New-Item -ItemType Directory -Force -Path $TempBuildRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $TempDistDir | Out-Null
+New-Item -ItemType Directory -Force -Path $TempWorkDir | Out-Null
+Copy-Item -LiteralPath $EntryScript -Destination $TempEntryScript -Force
 
 & $PythonExe -m PyInstaller `
   --onefile `
   --console `
   --name "WithCueAutoSort" `
-  --distpath $OutputDir `
-  --workpath $WorkDir `
-  --specpath $WorkDir `
-  $EntryScript
+  --distpath $TempDistDir `
+  --workpath $TempWorkDir `
+  --specpath $TempWorkDir `
+  $TempEntryScript
 
-Write-Host "자동 분류 exe 빌드를 완료했음."
+if ($LASTEXITCODE -ne 0) {
+  throw "PyInstaller build failed with exit code $LASTEXITCODE."
+}
+
+Copy-Item -LiteralPath (Join-Path $TempDistDir "WithCueAutoSort.exe") `
+  -Destination (Join-Path $OutputDir "WithCueAutoSort.exe") `
+  -Force
+
+Write-Host "WithCueAutoSort.exe build complete."

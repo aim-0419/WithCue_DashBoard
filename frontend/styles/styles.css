@@ -1180,6 +1180,10 @@ body::before {
   display: block;
 }
 
+.collection-preview--hidden {
+  display: none;
+}
+
 .collection-status-stack {
   display: grid;
   gap: 10px;
@@ -1307,6 +1311,94 @@ body::before {
 .collection-stop-button:disabled {
   opacity: 0.54;
   cursor: not-allowed;
+}
+
+.collection-manual-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(2, 10, 20, 0.72);
+}
+
+.collection-manual-modal__panel {
+  width: min(900px, 96vw);
+  display: grid;
+  gap: 18px;
+  padding: 22px;
+  border: 1px solid rgba(95, 202, 255, 0.28);
+  border-radius: 24px;
+  background: rgba(6, 23, 43, 0.98);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+}
+
+.collection-manual-modal__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.collection-manual-modal__header h2 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.collection-manual-modal__ghost {
+  min-height: 42px;
+  padding: 0 14px;
+  border: 1px solid rgba(95, 202, 255, 0.22);
+  border-radius: 14px;
+  background: rgba(12, 35, 64, 0.74);
+  color: var(--text);
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.collection-manual-modal__ghost:disabled {
+  opacity: 0.54;
+  cursor: not-allowed;
+}
+
+.collection-manual-modal__video-frame {
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid rgba(95, 202, 255, 0.18);
+  border-radius: 18px;
+  background: #000;
+}
+
+.collection-manual-modal__video,
+.collection-manual-modal__fallback {
+  width: 100%;
+  height: 100%;
+}
+
+.collection-manual-modal__video {
+  display: block;
+  object-fit: contain;
+  background: #000;
+}
+
+.collection-manual-modal__fallback {
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.collection-manual-modal__fallback p {
+  margin: 0;
+}
+
+.collection-manual-modal__actions {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.35fr) minmax(0, 1fr);
+  gap: 12px;
 }
 
 .legacy-drawer {

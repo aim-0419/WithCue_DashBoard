@@ -1,7 +1,9 @@
 ﻿from __future__ import annotations
 
 import csv
+import json
 import logging
+import os
 import shutil
 import subprocess
 import threading
@@ -11,6 +13,22 @@ from pathlib import Path
 
 import cv2
 from flask import Flask, Response, jsonify, render_template, request
+
+try:
+    import numpy as np
+except Exception as error:  # pragma: no cover - exercised only on missing local deps
+    np = None
+    NUMPY_IMPORT_ERROR = error
+else:
+    NUMPY_IMPORT_ERROR = None
+
+try:
+    import pyrealsense2 as rs
+except Exception as error:  # pragma: no cover - depends on local RealSense runtime
+    rs = None
+    REALSENSE_IMPORT_ERROR = error
+else:
+    REALSENSE_IMPORT_ERROR = None
 
 app = Flask(__name__)
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
@@ -56,6 +74,15 @@ CSV_HEADERS = [
 ]
 PREVIEW_MAX_WIDTH = 960
 PREVIEW_JPEG_QUALITY = 72
+DEFAULT_ALLOWED_ORIGINS = {
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+}
+REALSENSE_CAMERA_INDEX = -100
+REALSENSE_STREAM_WIDTH = 640
+REALSENSE_STREAM_HEIGHT = 480
+REALSENSE_STREAM_FPS = 30
+DEPTH_VALUE_BYTES = 2
 CAMERA_SCAN_RANGE = range(2)
 CAMERA_CHOICES = [
     {"index": 0, "label": "카메라 0"},
@@ -95,6 +122,63 @@ def get_camera_backend_name(backend_name: str) -> str:
     if backend_name == "msmf":
         return "MediaFoundation"
     return backend_name
+
+
+def get_realsense_unavailable_reason() -> str | None:
+    if rs is None:
+        return f"pyrealsense2 import failed: {REALSENSE_IMPORT_ERROR}"
+    if np is None:
+        return f"numpy import failed: {NUMPY_IMPORT_ERROR}"
+    return None
+
+
+def get_realsense_info(device, info) -> str:
+    try:
+        if device.supports(info):
+            return device.get_info(info)
+    except Exception:
+        return ""
+    return ""
+
+
+def get_realsense_device_choice() -> dict[str, int | str | bool] | None:
+    unavailable_reason = get_realsense_unavailable_reason()
+    if unavailable_reason:
+        app.logger.info("RealSense unavailable: %s", unavailable_reason)
+        return None
+
+    try:
+        devices = rs.context().query_devices()
+    except Exception as error:
+        app.logger.warning("failed to query RealSense devices: %s", error)
+        return None
+
+    if len(devices) == 0:
+        return None
+
+    device = devices[0]
+    name = get_realsense_info(device, rs.camera_info.name) or "Intel RealSense"
+    serial = get_realsense_info(device, rs.camera_info.serial_number)
+    label = f"{name} RGB+Depth"
+    if serial:
+        label = f"{label} ({serial})"
+    return {"index": REALSENSE_CAMERA_INDEX, "label": label, "depth": True}
+
+
+def intrinsics_to_dict(intrinsics) -> dict[str, object] | None:
+    if intrinsics is None:
+        return None
+
+    return {
+        "width": int(intrinsics.width),
+        "height": int(intrinsics.height),
+        "ppx": float(intrinsics.ppx),
+        "ppy": float(intrinsics.ppy),
+        "fx": float(intrinsics.fx),
+        "fy": float(intrinsics.fy),
+        "model": str(intrinsics.model),
+        "coeffs": [float(value) for value in intrinsics.coeffs],
+    }
 
 
 def get_windows_camera_names() -> list[str]:
@@ -141,10 +225,13 @@ def get_windows_camera_names() -> list[str]:
     return []
 
 
-def get_camera_choices() -> list[dict[str, int | str]]:
+def get_camera_choices() -> list[dict[str, int | str | bool]]:
     # 장치명과 인덱스를 같이 내려 프론트에서 사람이 읽기 쉬운 목록을 만든다.
     device_names = get_windows_camera_names()
-    choices: list[dict[str, int | str]] = []
+    choices: list[dict[str, int | str | bool]] = []
+    realsense_choice = get_realsense_device_choice()
+    if realsense_choice:
+        choices.append(realsense_choice)
 
     for idx, camera in enumerate(CAMERA_CHOICES):
         label = camera["label"]
@@ -185,6 +272,15 @@ def sync_locations_snapshot_async() -> None:
     threading.Thread(target=sync_locations_snapshot, daemon=True).start()
 
 
+def get_allowed_origins() -> set[str]:
+    configured_origins = {
+        origin.strip().rstrip("/")
+        for origin in os.environ.get("WITHCUE_ALLOWED_ORIGINS", "").split(",")
+        if origin.strip()
+    }
+    return DEFAULT_ALLOWED_ORIGINS | configured_origins
+
+
 def generate_mjpeg_stream():
     while True:
         image_bytes = camera_manager.get_jpeg_frame()
@@ -209,10 +305,31 @@ class CameraManager:
         self.recording = False
         self.writer: cv2.VideoWriter | None = None
         self.read_fail_count = 0
+        self.source_type: str | None = None
+        self.rs_pipeline = None
+        self.rs_align = None
+        self.rs_depth_scale = 0.001
+        self.rs_depth_intrinsics = None
+        self.rs_depth_width = REALSENSE_STREAM_WIDTH
+        self.rs_depth_height = REALSENSE_STREAM_HEIGHT
+        self.depth_file = None
+        self.depth_index_file = None
+        self.depth_index_writer: csv.DictWriter | None = None
+        self.depth_raw_path: Path | None = None
+        self.depth_index_path: Path | None = None
+        self.depth_metadata_path: Path | None = None
+        self.depth_metadata: dict[str, object] | None = None
+        self.depth_frame_count = 0
+        self.recording_output_path: Path | None = None
+        self.last_recording: dict[str, object] | None = None
 
-    def list_cameras(self) -> list[dict[str, int | str]]:
+    def list_cameras(self) -> list[dict[str, int | str | bool]]:
         # 현장 장비 기준으로 짧은 인덱스 범위만 검사해 카메라 탐색 지연을 줄인다.
-        cameras: list[dict[str, int | str]] = []
+        cameras: list[dict[str, int | str | bool]] = []
+        realsense_choice = get_realsense_device_choice()
+        if realsense_choice:
+            cameras.append(realsense_choice)
+
         seen_indexes: set[int] = set()
         for index in CAMERA_SCAN_RANGE:
             found_backend_name = None
@@ -247,17 +364,23 @@ class CameraManager:
         ]
 
     def open_camera(self, index: int) -> None:
+        if index == REALSENSE_CAMERA_INDEX:
+            self._open_realsense_camera()
+            return
+        self._open_opencv_camera(index)
+
+    def _open_opencv_camera(self, index: int) -> None:
         with self.lock:
-            if self.camera_index == index and self.capture is not None and self.capture.isOpened():
+            if (
+                self.camera_index == index
+                and self.source_type == "opencv"
+                and self.capture is not None
+                and self.capture.isOpened()
+            ):
                 return
-            # 새 카메라 오픈 실패 시 기존 정상 프리뷰를 유지하기 위해 이전 상태를 보관한다.
-            previous_capture = self.capture
-            previous_index = self.camera_index
-            previous_frame = self.frame
-            previous_writer = self.writer
-            previous_running = self.running
-            previous_thread = self.thread
+
             capture = None
+            warmed_frame = None
             selected_backend_name = None
             last_error_backend = None
 
@@ -277,7 +400,6 @@ class CameraManager:
                 current_capture.set(cv2.CAP_PROP_FPS, 30)
                 current_capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-                warmed_frame = None
                 for _ in range(30):
                     ok, frame = current_capture.read()
                     if ok and frame is not None:
@@ -288,7 +410,6 @@ class CameraManager:
                 if warmed_frame is not None:
                     capture = current_capture
                     selected_backend_name = get_camera_backend_name(backend_name)
-                    self.frame = warmed_frame
                     break
 
                 last_error_backend = get_camera_backend_name(backend_name)
@@ -299,21 +420,17 @@ class CameraManager:
                 )
                 current_capture.release()
 
-            if capture is None or not capture.isOpened():
+            if capture is None or not capture.isOpened() or warmed_frame is None:
                 if capture is not None:
                     capture.release()
-                self.capture = previous_capture
-                self.camera_index = previous_index
-                self.frame = previous_frame
-                self.writer = previous_writer
-                self.running = previous_running
-                self.thread = previous_thread
                 app.logger.warning("camera open failed: index=%s backend=%s", index, last_error_backend or "unknown")
                 raise RuntimeError("선택한 카메라에서 프레임을 읽지 못했습니다.")
 
             self._close_locked()
             self.capture = capture
             self.camera_index = index
+            self.frame = warmed_frame
+            self.source_type = "opencv"
             self.running = True
             self.read_fail_count = 0
             app.logger.info("camera opened: index=%s backend=%s", index, selected_backend_name or "unknown")
@@ -321,45 +438,192 @@ class CameraManager:
             self.thread = threading.Thread(target=self._update_frames, daemon=True)
             self.thread.start()
 
+    def _open_realsense_camera(self) -> None:
+        unavailable_reason = get_realsense_unavailable_reason()
+        if unavailable_reason:
+            raise RuntimeError(
+                "RealSense 카메라를 사용하려면 pyrealsense2와 numpy가 필요합니다. "
+                f"상세: {unavailable_reason}"
+            )
+
+        with self.lock:
+            if self.camera_index == REALSENSE_CAMERA_INDEX and self.source_type == "realsense" and self.rs_pipeline:
+                return
+
+            try:
+                devices = rs.context().query_devices()
+            except Exception as error:
+                raise RuntimeError(f"RealSense 장치 목록을 읽지 못했습니다: {error}") from error
+
+            if len(devices) == 0:
+                raise RuntimeError("연결된 Intel RealSense 카메라를 찾지 못했습니다.")
+
+            pipeline = rs.pipeline()
+            config = rs.config()
+            config.enable_stream(
+                rs.stream.depth,
+                REALSENSE_STREAM_WIDTH,
+                REALSENSE_STREAM_HEIGHT,
+                rs.format.z16,
+                REALSENSE_STREAM_FPS,
+            )
+            config.enable_stream(
+                rs.stream.color,
+                REALSENSE_STREAM_WIDTH,
+                REALSENSE_STREAM_HEIGHT,
+                rs.format.bgr8,
+                REALSENSE_STREAM_FPS,
+            )
+
+            warmed_frame = None
+            depth_intrinsics = None
+            depth_width = REALSENSE_STREAM_WIDTH
+            depth_height = REALSENSE_STREAM_HEIGHT
+            align = rs.align(rs.stream.color)
+
+            try:
+                profile = pipeline.start(config)
+                depth_sensor = profile.get_device().first_depth_sensor()
+                depth_scale = float(depth_sensor.get_depth_scale())
+
+                for _ in range(30):
+                    frames = pipeline.wait_for_frames(1000)
+                    aligned_frames = align.process(frames)
+                    depth_frame = aligned_frames.get_depth_frame()
+                    color_frame = aligned_frames.get_color_frame()
+                    if not depth_frame or not color_frame:
+                        continue
+
+                    warmed_frame = np.asanyarray(color_frame.get_data()).copy()
+                    video_profile = depth_frame.profile.as_video_stream_profile()
+                    depth_intrinsics = video_profile.intrinsics
+                    depth_width = int(depth_frame.get_width())
+                    depth_height = int(depth_frame.get_height())
+                    break
+            except Exception as error:
+                try:
+                    pipeline.stop()
+                except Exception:
+                    pass
+                raise RuntimeError(f"RealSense 스트림을 열지 못했습니다: {error}") from error
+
+            if warmed_frame is None:
+                try:
+                    pipeline.stop()
+                except Exception:
+                    pass
+                raise RuntimeError("RealSense 카메라에서 컬러/깊이 프레임을 읽지 못했습니다.")
+
+            self._close_locked()
+            self.rs_pipeline = pipeline
+            self.rs_align = align
+            self.rs_depth_scale = depth_scale
+            self.rs_depth_intrinsics = depth_intrinsics
+            self.rs_depth_width = depth_width
+            self.rs_depth_height = depth_height
+            self.camera_index = REALSENSE_CAMERA_INDEX
+            self.frame = warmed_frame
+            self.source_type = "realsense"
+            self.running = True
+            self.read_fail_count = 0
+            app.logger.info("RealSense camera opened: %sx%s@%s", depth_width, depth_height, REALSENSE_STREAM_FPS)
+
+            self.thread = threading.Thread(target=self._update_frames, daemon=True)
+            self.thread.start()
+
     def _close_locked(self) -> None:
         self.running = False
+        self.recording = False
         if self.writer:
             self.writer.release()
             self.writer = None
+        self._close_depth_recording_locked(finalized=False)
         if self.capture:
             self.capture.release()
             self.capture = None
+        if self.rs_pipeline:
+            try:
+                self.rs_pipeline.stop()
+            except Exception as error:
+                app.logger.warning("failed to stop RealSense pipeline: %s", error)
+            self.rs_pipeline = None
+            self.rs_align = None
         self.camera_index = None
+        self.source_type = None
+        self.recording_output_path = None
         self.frame = None
+        self.thread = None
 
     def close_camera(self) -> None:
         with self.lock:
             self._close_locked()
 
+    def _handle_frame_read_failure(self) -> None:
+        with self.lock:
+            self.read_fail_count += 1
+            count = self.read_fail_count
+            camera_index = self.camera_index
+        if count in {1, 10, 30, 60}:
+            app.logger.warning("camera frame read failed: index=%s count=%s", camera_index, count)
+        time.sleep(0.02)
+
+    def _read_realsense_frame(self):
+        if self.rs_pipeline is None or np is None:
+            return None
+
+        try:
+            frames = self.rs_pipeline.wait_for_frames(1000)
+            aligned_frames = self.rs_align.process(frames) if self.rs_align else frames
+            depth_frame = aligned_frames.get_depth_frame()
+            color_frame = aligned_frames.get_color_frame()
+        except Exception:
+            return None
+
+        if not depth_frame or not color_frame:
+            return None
+
+        color_image = np.asanyarray(color_frame.get_data()).copy()
+        depth_image = np.asanyarray(depth_frame.get_data()).copy()
+        return color_image, depth_image, float(depth_frame.get_timestamp()), float(color_frame.get_timestamp())
+
     def _update_frames(self) -> None:
         # 프리뷰와 실제 녹화가 같은 캡처를 공유하도록 최신 프레임을 계속 메모리에 유지한다.
         while True:
             with self.lock:
-                if not self.running or self.capture is None:
+                if not self.running:
                     break
+                source_type = self.source_type
                 capture = self.capture
-                writer = self.writer
+
+            if source_type == "realsense":
+                frame_data = self._read_realsense_frame()
+                if frame_data is None:
+                    self._handle_frame_read_failure()
+                    continue
+
+                frame, depth_image, depth_timestamp_ms, color_timestamp_ms = frame_data
+                with self.lock:
+                    self.read_fail_count = 0
+                    self.frame = frame
+                    if self.writer is not None:
+                        self.writer.write(frame)
+                    if self.recording:
+                        self._write_depth_frame_locked(depth_image, depth_timestamp_ms, color_timestamp_ms)
+                time.sleep(0.001)
+                continue
+
+            if capture is None:
+                break
+
             ok, frame = capture.read()
             if not ok:
-                self.read_fail_count += 1
-                if self.read_fail_count in {1, 10, 30, 60}:
-                    app.logger.warning(
-                        "camera frame read failed: index=%s count=%s",
-                        self.camera_index,
-                        self.read_fail_count,
-                    )
-                time.sleep(0.02)
+                self._handle_frame_read_failure()
                 continue
             with self.lock:
                 self.read_fail_count = 0
                 self.frame = frame
-                if writer is not None:
-                    writer.write(frame)
+                if self.writer is not None:
+                    self.writer.write(frame)
             time.sleep(0.01)
 
     def get_jpeg_frame(self) -> bytes | None:
@@ -384,31 +648,199 @@ class CameraManager:
             return None
         return buffer.tobytes()
 
-    def start_recording(self, output_path: Path) -> None:
+    def start_recording(self, output_path: Path) -> dict[str, object]:
         # 실제 저장 영상은 프리뷰와 별도로 mp4 파일로 기록된다.
         with self.lock:
-            if self.capture is None or not self.capture.isOpened():
-                raise RuntimeError("카메라가 준비되지 않았습니다.")
             if self.recording:
                 raise RuntimeError("이미 녹화 중입니다.")
-            width = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
-            height = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
-            fps = self.capture.get(cv2.CAP_PROP_FPS)
-            fps_value = fps if fps and fps > 1 else 30.0
+            if self.source_type == "realsense":
+                if self.rs_pipeline is None or self.frame is None:
+                    raise RuntimeError("RealSense 카메라가 준비되지 않았습니다.")
+                height, width = self.frame.shape[:2]
+                fps_value = float(REALSENSE_STREAM_FPS)
+            else:
+                if self.capture is None or not self.capture.isOpened():
+                    raise RuntimeError("카메라가 준비되지 않았습니다.")
+                width = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
+                height = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
+                fps = self.capture.get(cv2.CAP_PROP_FPS)
+                fps_value = fps if fps and fps > 1 else 30.0
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(str(output_path), fourcc, fps_value, (width, height))
             if not writer.isOpened():
                 writer.release()
                 raise RuntimeError("녹화 파일을 열지 못했습니다.")
+
+            try:
+                if self.source_type == "realsense":
+                    self._open_depth_recording_locked(output_path)
+            except Exception:
+                writer.release()
+                self._close_depth_recording_locked(finalized=False)
+                raise
+
             self.writer = writer
             self.recording = True
+            self.recording_output_path = output_path
+            self.last_recording = None
+            return self._build_recording_details_locked(output_path)
 
-    def stop_recording(self) -> None:
+    def stop_recording(self) -> dict[str, object] | None:
         with self.lock:
             self.recording = False
+            output_path = self.recording_output_path
             if self.writer:
                 self.writer.release()
                 self.writer = None
+            self._close_depth_recording_locked(finalized=True)
+            details = self._build_recording_details_locked(output_path) if output_path else None
+            self.recording_output_path = None
+            if details:
+                self.last_recording = details
+            return details
+
+    def _open_depth_recording_locked(self, output_path: Path) -> None:
+        self.depth_raw_path = output_path.with_suffix(".depth.raw")
+        self.depth_index_path = output_path.with_suffix(".depth.csv")
+        self.depth_metadata_path = output_path.with_suffix(".depth.json")
+        self.depth_file = self.depth_raw_path.open("wb")
+        self.depth_index_file = self.depth_index_path.open("w", newline="", encoding="utf-8")
+        self.depth_index_writer = csv.DictWriter(
+            self.depth_index_file,
+            fieldnames=[
+                "frame_number",
+                "raw_offset_bytes",
+                "width",
+                "height",
+                "depth_timestamp_ms",
+                "color_timestamp_ms",
+                "system_timestamp",
+            ],
+        )
+        self.depth_index_writer.writeheader()
+        self.depth_frame_count = 0
+        self.depth_metadata = {
+            "format_version": 1,
+            "source": "Intel RealSense",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "finalized": False,
+            "color_file": output_path.name,
+            "depth_raw_file": self.depth_raw_path.name,
+            "depth_index_file": self.depth_index_path.name,
+            "depth_value_type": "uint16",
+            "depth_value_bytes": DEPTH_VALUE_BYTES,
+            "depth_scale_to_meters": float(self.rs_depth_scale),
+            "depth_shape": {
+                "width": int(self.rs_depth_width),
+                "height": int(self.rs_depth_height),
+                "channels": 1,
+            },
+            "stream": {
+                "width": REALSENSE_STREAM_WIDTH,
+                "height": REALSENSE_STREAM_HEIGHT,
+                "fps": REALSENSE_STREAM_FPS,
+            },
+            "intrinsics": intrinsics_to_dict(self.rs_depth_intrinsics),
+            "depth_meters_formula": "meters = raw_uint16 * depth_scale_to_meters",
+            "xyz_formula": "Z=meters; X=(pixel_x-ppx)*Z/fx; Y=(pixel_y-ppy)*Z/fy",
+        }
+        self._write_depth_metadata_locked()
+
+    def _write_depth_frame_locked(
+        self,
+        depth_image,
+        depth_timestamp_ms: float,
+        color_timestamp_ms: float,
+    ) -> None:
+        if self.depth_file is None or self.depth_index_writer is None or np is None:
+            return
+
+        depth_u16 = depth_image.astype(np.uint16, copy=False)
+        height, width = depth_u16.shape[:2]
+        raw_offset = self.depth_file.tell()
+        depth_u16.tofile(self.depth_file)
+        self.depth_index_writer.writerow(
+            {
+                "frame_number": self.depth_frame_count,
+                "raw_offset_bytes": raw_offset,
+                "width": width,
+                "height": height,
+                "depth_timestamp_ms": f"{depth_timestamp_ms:.3f}",
+                "color_timestamp_ms": f"{color_timestamp_ms:.3f}",
+                "system_timestamp": datetime.now().isoformat(timespec="milliseconds"),
+            }
+        )
+        self.depth_frame_count += 1
+
+    def _write_depth_metadata_locked(self) -> None:
+        if self.depth_metadata_path is None or self.depth_metadata is None:
+            return
+        with self.depth_metadata_path.open("w", encoding="utf-8") as file:
+            json.dump(self.depth_metadata, file, ensure_ascii=False, indent=2)
+
+    def _close_depth_recording_locked(self, finalized: bool) -> None:
+        if (
+            self.depth_file is None
+            and self.depth_index_file is None
+            and self.depth_metadata is None
+        ):
+            return
+
+        if self.depth_file:
+            self.depth_file.flush()
+        if self.depth_index_file:
+            self.depth_index_file.flush()
+        if self.depth_metadata is not None:
+            self.depth_metadata["finalized"] = finalized
+            self.depth_metadata["ended_at"] = datetime.now().isoformat(timespec="seconds")
+            self.depth_metadata["frame_count"] = int(self.depth_frame_count)
+            self._write_depth_metadata_locked()
+        if self.depth_file:
+            self.depth_file.close()
+        if self.depth_index_file:
+            self.depth_index_file.close()
+
+        self.depth_file = None
+        self.depth_index_file = None
+        self.depth_index_writer = None
+        self.depth_metadata = None
+
+    def _build_recording_details_locked(self, output_path: Path | None) -> dict[str, object] | None:
+        if output_path is None:
+            return None
+
+        details: dict[str, object] = {
+            "file_name": output_path.name,
+            "file_path": str(output_path),
+            "mime_type": "video/mp4",
+            "source_type": self.source_type or "",
+            "size": output_path.stat().st_size if output_path.exists() else 0,
+        }
+
+        depth_raw_path = output_path.with_suffix(".depth.raw")
+        depth_index_path = output_path.with_suffix(".depth.csv")
+        depth_metadata_path = output_path.with_suffix(".depth.json")
+        if depth_raw_path.exists():
+            details.update(
+                {
+                    "depth": True,
+                    "depth_frame_count": int(self.depth_frame_count),
+                    "depth_raw_file_name": depth_raw_path.name,
+                    "depth_raw_file_path": str(depth_raw_path),
+                    "depth_raw_size": depth_raw_path.stat().st_size,
+                    "depth_index_file_name": depth_index_path.name,
+                    "depth_index_file_path": str(depth_index_path),
+                    "depth_metadata_file_name": depth_metadata_path.name,
+                    "depth_metadata_file_path": str(depth_metadata_path),
+                }
+            )
+        else:
+            details["depth"] = False
+            details["depth_frame_count"] = 0
+
+        return details
 
 
 camera_manager = CameraManager()
@@ -419,6 +851,7 @@ def ensure_storage() -> None:
     SAVE_ROOT.mkdir(parents=True, exist_ok=True)
     for path in PART_DIRS.values():
         path.mkdir(parents=True, exist_ok=True)
+        (path / f"W_{path.name}").mkdir(parents=True, exist_ok=True)
     if not PARTICIPANTS_CSV.exists():
         with PARTICIPANTS_CSV.open("w", newline="", encoding="utf-8-sig") as file:
             writer = csv.DictWriter(file, fieldnames=CSV_HEADERS)
@@ -535,19 +968,44 @@ def get_or_create_participant(
     return participant_id, True
 
 
-def get_next_recording_path(participant_id: str, part_name: str, site_code: str) -> Path:
-    # 파일명 규칙: 지점코드_참가자ID_부위코드_촬영순번.mp4
-    part_dir = PART_DIRS[part_name]
+def normalize_posture_type(value: str | None) -> str:
+    return "incorrect" if value == "incorrect" else "correct"
+
+
+def get_recording_part_code(part_name: str, posture_type: str | None) -> str:
     part_code = PART_CODES[part_name]
+    if normalize_posture_type(posture_type) == "incorrect":
+        return f"{part_code}1"
+    return part_code
+
+
+def get_recording_target_dir(part_name: str, posture_type: str | None) -> Path:
+    part_dir = PART_DIRS[part_name]
+    if normalize_posture_type(posture_type) == "incorrect":
+        return part_dir / f"W_{part_dir.name}"
+    return part_dir
+
+
+def get_next_recording_path(
+    participant_id: str,
+    part_name: str,
+    site_code: str,
+    posture_type: str | None = None,
+) -> Path:
+    # 파일명 규칙: 지점코드_부위코드_참가자ID_촬영순번.mp4
+    # 자동 분류 스크립트가 두 번째 토큰의 부위코드를 읽어 최종 폴더로 옮긴다.
+    part_code = get_recording_part_code(part_name, posture_type)
+    scan_dirs = [SAVE_ROOT, get_recording_target_dir(part_name, posture_type)]
     highest_take = 0
-    for file_path in part_dir.glob(f"{site_code}_{participant_id}_{part_code}_*.mp4"):
-        stem_parts = file_path.stem.split("_")
-        if len(stem_parts) != 4:
-            continue
-        if stem_parts[3].isdigit():
-            highest_take = max(highest_take, int(stem_parts[3]))
+    for scan_dir in scan_dirs:
+        for file_path in scan_dir.glob(f"{site_code}_{part_code}_{participant_id}_*.mp4"):
+            stem_parts = file_path.stem.split("_")
+            if len(stem_parts) < 4:
+                continue
+            if stem_parts[3].isdigit():
+                highest_take = max(highest_take, int(stem_parts[3]))
     next_take = f"{highest_take + 1:03d}"
-    return part_dir / f"{site_code}_{participant_id}_{part_code}_{next_take}.mp4"
+    return SAVE_ROOT / f"{site_code}_{part_code}_{participant_id}_{next_take}.mp4"
 
 
 @app.after_request
@@ -555,6 +1013,12 @@ def add_no_cache_headers(response):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
+    origin = request.headers.get("Origin", "").rstrip("/")
+    if origin in get_allowed_origins():
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Vary"] = "Origin"
     return response
 
 
@@ -662,6 +1126,7 @@ def record_start():
     participant_id = str(payload.get("participant_id", "")).strip()
     part_name = str(payload.get("part_name", "")).strip()
     camera_index = payload.get("camera_index")
+    posture_type = normalize_posture_type(str(payload.get("posture_type", "correct")).strip())
     site_key = str(payload.get("site_key", "aim")).strip()
     site_config = get_site_config(site_key)
 
@@ -674,20 +1139,20 @@ def record_start():
 
     try:
         camera_manager.open_camera(int(camera_index))
-        output_path = get_next_recording_path(participant_id, part_name, site_config["code"])
-        camera_manager.start_recording(output_path)
+        output_path = get_next_recording_path(participant_id, part_name, site_config["code"], posture_type)
+        recording = camera_manager.start_recording(output_path)
     except Exception as error:
         return jsonify({"error": str(error)}), 400
-    return jsonify({"started": True})
+    return jsonify({"started": True, "recording": recording})
 
 
 @app.post("/api/record/stop")
 def record_stop():
     # 녹화가 끝나면 writer를 닫고 최신 건수를 Firebase로 비동기 반영한다.
-    camera_manager.stop_recording()
+    recording = camera_manager.stop_recording()
     camera_manager.close_camera()
     sync_locations_snapshot_async()
-    return jsonify({"stopped": True})
+    return jsonify({"stopped": True, "recording": recording or camera_manager.last_recording})
 
 
 @app.get("/api/frame")

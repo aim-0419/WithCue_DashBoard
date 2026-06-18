@@ -7,7 +7,7 @@ import {
 } from "firebase/firestore";
 import { getFirebaseDb, waitForFirebaseAuthReady } from "./firebase-client.js";
 
-// 지점 코드와 표시명을 한 곳에서 관리함.
+// 지점 코드와 표시 이름은 파일명 생성과 대시보드 표시에서 함께 사용합니다.
 export const LOCATION_META = {
   aim: {
     docId: "Company",
@@ -32,7 +32,7 @@ export const LOCATION_META = {
   },
 };
 
-// 촬영 부위 메타와 파일명 코드를 함께 관리함.
+// 촬영 부위 메타는 UI 라벨과 파일명용 코드 생성을 함께 관리합니다.
 export const BODY_PART_OPTIONS = [
   { key: "Neck", label: "목", fileSegment: "neck" },
   { key: "Hip", label: "허리", fileSegment: "hip" },
@@ -98,6 +98,7 @@ function normalizeBodyParts(value) {
   };
 }
 
+// locations 문서는 보기 좋은 요약판 역할이라서 수집 성공 후 숫자만 같이 올립니다.
 async function syncLocationConsentSummary(locationMeta) {
   const db = getFirebaseDb();
   const locationRef = doc(db, "locations", locationMeta.docId);
@@ -185,12 +186,13 @@ function toFriendlyCollectionError(error, fallbackMessage) {
   }
 
   if (code.includes("deadline-exceeded") || code.includes("timeout")) {
-    return "수집 요청 응답이 지연되고 있습니다. 잠시 후 다시 시도해 주세요.";
+    return "수집 요청 응답이 지연되고 있습니다. 잠시 뒤 다시 시도해 주세요.";
   }
 
   return error?.message || fallbackMessage;
 }
 
+// 같은 회원이 같은 지점에서 수집을 시작하면 참여 기록을 한 번만 만듭니다.
 export async function ensureCollectorConsentAtLocation(session) {
   try {
     await waitForFirebaseAuthReady();
@@ -246,11 +248,12 @@ export async function ensureCollectorConsentAtLocation(session) {
     return result;
   } catch (error) {
     throw new Error(
-      toFriendlyCollectionError(error, "지점 동의 처리 중 오류가 발생했습니다."),
+      toFriendlyCollectionError(error, "지점 참여 기록 처리 중 오류가 발생했습니다."),
     );
   }
 }
 
+// 실제 영상 1개를 collectionSessions에 저장하고 지점 보조 집계도 함께 올립니다.
 export async function saveCollectionRecording({
   session,
   bodyPartKey,
@@ -258,6 +261,8 @@ export async function saveCollectionRecording({
   mimeType,
   size,
   durationMs,
+  sourceType = "browser",
+  depth = null,
 }) {
   try {
     await waitForFirebaseAuthReady();
@@ -288,6 +293,13 @@ export async function saveCollectionRecording({
       MimeType: mimeType,
       FileSize: Number(size || 0),
       DurationMs: Number(durationMs || 0),
+      SourceType: sourceType,
+      DepthEnabled: Boolean(depth?.enabled),
+      DepthFrameCount: Number(depth?.frameCount || 0),
+      DepthRawFileName: depth?.rawFileName || "",
+      DepthIndexFileName: depth?.indexFileName || "",
+      DepthMetadataFileName: depth?.metadataFileName || "",
+      DepthRawSize: Number(depth?.rawSize || 0),
       CreatedAt: serverTimestamp(),
     });
 
@@ -307,6 +319,7 @@ export async function saveCollectionRecording({
   }
 }
 
+// 파일명은 지점 코드 - 부위 코드 - 회원 코드 형식으로 고정합니다.
 export function buildRecordingFileName(session, bodyPartKey) {
   const locationMeta = getLocationMeta(session?.location);
   const bodyPartCode = getPostureCode(bodyPartKey, session?.postureType);
