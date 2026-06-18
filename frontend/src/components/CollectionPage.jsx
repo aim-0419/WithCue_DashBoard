@@ -457,7 +457,7 @@ export function CollectionPage({
   }
 
   function openManualBeforeRecording(bodyPartKey) {
-    if (!isCameraReady || isRecording || isSaving) {
+    if (isRecording || isSaving) {
       return;
     }
 
@@ -616,7 +616,7 @@ export function CollectionPage({
                       selectedBodyPartKey === bodyPart.key ? " is-active" : ""
                     }`}
                     onClick={() => openManualBeforeRecording(bodyPart.key)}
-                    disabled={!isCameraReady || isRecording || isSaving}
+                    disabled={isRecording || isSaving}
                   >
                     {bodyPart.label}
                   </button>
@@ -636,7 +636,7 @@ export function CollectionPage({
                 type="button"
                 className="auth-submit"
                 onClick={() => openManualBeforeRecording(selectedBodyPartKey)}
-                disabled={!isCameraReady || isRecording || isSaving}
+                disabled={isRecording || isSaving}
               >
                 {isSaving ? "저장 중..." : isRecording ? "녹화 중" : `${activeBodyPart.label} 녹화 시작`}
               </button>
