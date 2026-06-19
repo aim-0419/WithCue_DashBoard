@@ -4,6 +4,7 @@ import csv
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -12,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 import cv2
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, send_file
 
 try:
     import numpy as np
@@ -53,6 +54,22 @@ PART_DIRS = {
     "왼쪽 무릎": SAVE_ROOT / "L_Knee",
     "오른쪽 무릎": SAVE_ROOT / "R_Knee",
 }
+SORT_TARGETS = {
+    "01": ("Neck", False),
+    "011": ("Neck", True),
+    "02": ("Hip", False),
+    "021": ("Hip", True),
+    "03": ("L_Shoulder", False),
+    "031": ("L_Shoulder", True),
+    "04": ("R_Shoulder", False),
+    "041": ("R_Shoulder", True),
+    "05": ("L_Knee", False),
+    "051": ("L_Knee", True),
+    "06": ("R_Knee", False),
+    "061": ("R_Knee", True),
+}
+DEPTH_SIDECAR_SUFFIXES = (".depth.raw", ".depth.csv", ".depth.json")
+SORT_SKIP_FILES = {"participants.csv"}
 PART_CODES = {
     "목": "01",
     "허리": "02",
@@ -240,6 +257,55 @@ def get_camera_choices() -> list[dict[str, int | str | bool]]:
         choices.append({"index": camera["index"], "label": label})
 
     return choices
+
+
+def split_recording_stem(file_name: str) -> tuple[str, str]:
+    lower = file_name.lower()
+    for suffix in DEPTH_SIDECAR_SUFFIXES:
+        if lower.endswith(suffix):
+            return file_name[: -len(suffix)], file_name[-len(suffix):]
+    p = Path(file_name)
+    return p.stem, p.suffix
+
+
+def get_sort_target_dir(base_dir: Path, stem: str) -> Path:
+    parts = [p for p in re.split(r"[-_]", stem) if p]
+    if len(parts) < 2:
+        return base_dir / "_unclassified"
+    body_part_code = parts[1]
+    target_info = SORT_TARGETS.get(body_part_code)
+    if not target_info:
+        return base_dir / "_unclassified"
+    folder_name, is_wrong = target_info
+    target = base_dir / folder_name
+    return target / f"W_{folder_name}" if is_wrong else target
+
+
+def sort_recording_group(base_dir: Path, output_path: Path) -> dict[str, str]:
+    stem = output_path.stem
+    target_dir = get_sort_target_dir(base_dir, stem)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    candidates = [output_path] + [
+        output_path.parent / f"{stem}{suf}" for suf in DEPTH_SIDECAR_SUFFIXES
+    ]
+    files = [f for f in candidates if f.exists() and f.is_file()]
+    if not files:
+        return {}
+
+    result: dict[str, str] = {}
+    for src in files:
+        _, suffix = split_recording_stem(src.name)
+        dst = target_dir / f"{stem}{suffix}"
+        counter = 1
+        while dst.exists():
+            dst = target_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+        shutil.move(str(src), str(dst))
+        result[src.name] = str(dst)
+        app.logger.info("[sort] %s -> %s", src.name, dst)
+
+    return result
 
 
 def sync_locations_snapshot() -> None:
@@ -858,6 +924,23 @@ def ensure_storage() -> None:
             writer.writeheader()
 
 
+def sort_existing_files() -> None:
+    # 서버 시작 시 루트에 남아 있는 미분류 mp4 파일을 부위 폴더로 정렬한다.
+    for file_path in list(SAVE_ROOT.iterdir()):
+        if not file_path.is_file():
+            continue
+        if file_path.name in SORT_SKIP_FILES:
+            continue
+        if file_path.suffix.lower() != ".mp4":
+            continue
+        try:
+            moved = sort_recording_group(SAVE_ROOT, file_path)
+            if moved:
+                print(f"[sort] startup sorted {file_path.name} -> {list(moved.values())[0]}")
+        except Exception as exc:
+            print(f"[sort] startup sort failed for {file_path.name}: {exc}")
+
+
 def load_participants() -> list[dict[str, str]]:
     ensure_storage()
     with PARTICIPANTS_CSV.open("r", newline="", encoding="utf-8-sig") as file:
@@ -992,20 +1075,19 @@ def get_next_recording_path(
     site_code: str,
     posture_type: str | None = None,
 ) -> Path:
-    # 파일명 규칙: 지점코드_부위코드_참가자ID_촬영순번.mp4
-    # 자동 분류 스크립트가 두 번째 토큰의 부위코드를 읽어 최종 폴더로 옮긴다.
     part_code = get_recording_part_code(part_name, posture_type)
-    scan_dirs = [SAVE_ROOT, get_recording_target_dir(part_name, posture_type)]
+    target_dir = get_recording_target_dir(part_name, posture_type)
+    app.logger.warning(f"[path] part_name={part_name!r} target_dir={target_dir}")
     highest_take = 0
-    for scan_dir in scan_dirs:
-        for file_path in scan_dir.glob(f"{site_code}_{part_code}_{participant_id}_*.mp4"):
-            stem_parts = file_path.stem.split("_")
-            if len(stem_parts) < 4:
-                continue
-            if stem_parts[3].isdigit():
-                highest_take = max(highest_take, int(stem_parts[3]))
+    for file_path in target_dir.glob(f"{site_code}_{part_code}_{participant_id}_*.mp4"):
+        stem_parts = file_path.stem.split("_")
+        if len(stem_parts) >= 4 and stem_parts[3].isdigit():
+            highest_take = max(highest_take, int(stem_parts[3]))
     next_take = f"{highest_take + 1:03d}"
-    return SAVE_ROOT / f"{site_code}_{part_code}_{participant_id}_{next_take}.mp4"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    result = target_dir / f"{site_code}_{part_code}_{participant_id}_{next_take}.mp4"
+    app.logger.warning(f"[path] output_path={result}")
+    return result
 
 
 @app.after_request
@@ -1101,7 +1183,6 @@ def register():
         consent,
         site_config["code"],
     )
-    sync_locations_snapshot_async()
     return jsonify({"participant_id": participant_id, "created": created})
 
 
@@ -1121,7 +1202,6 @@ def preview_start():
 
 @app.post("/api/record/start")
 def record_start():
-    # 부위 버튼 클릭 시 해당 부위 폴더 아래에 새 mp4 파일을 만들어 녹화를 시작한다.
     payload = request.get_json(silent=True) or {}
     participant_id = str(payload.get("participant_id", "")).strip()
     part_name = str(payload.get("part_name", "")).strip()
@@ -1129,10 +1209,12 @@ def record_start():
     posture_type = normalize_posture_type(str(payload.get("posture_type", "correct")).strip())
     site_key = str(payload.get("site_key", "aim")).strip()
     site_config = get_site_config(site_key)
+    app.logger.warning(f"[record_start] part_name={part_name!r} participant_id={participant_id!r}")
 
     if not participant_id:
         return jsonify({"error": "participant_id가 없습니다."}), 400
     if part_name not in PART_DIRS:
+        app.logger.warning(f"[record_start] INVALID part_name={part_name!r}, PART_DIRS keys={list(PART_DIRS.keys())}")
         return jsonify({"error": "유효하지 않은 부위입니다."}), 400
     if camera_index is None:
         return jsonify({"error": "camera_index가 없습니다."}), 400
@@ -1140,18 +1222,18 @@ def record_start():
     try:
         camera_manager.open_camera(int(camera_index))
         output_path = get_next_recording_path(participant_id, part_name, site_config["code"], posture_type)
+        app.logger.warning(f"[record_start] output_path={output_path}")
         recording = camera_manager.start_recording(output_path)
     except Exception as error:
+        app.logger.warning(f"[record_start] error={error}")
         return jsonify({"error": str(error)}), 400
     return jsonify({"started": True, "recording": recording})
 
 
 @app.post("/api/record/stop")
 def record_stop():
-    # 녹화가 끝나면 writer를 닫고 최신 건수를 Firebase로 비동기 반영한다.
     recording = camera_manager.stop_recording()
     camera_manager.close_camera()
-    sync_locations_snapshot_async()
     return jsonify({"stopped": True, "recording": recording or camera_manager.last_recording})
 
 
@@ -1172,6 +1254,30 @@ def video_feed():
     )
 
 
+@app.get("/api/download")
+def download_recording_file():
+    filename = request.args.get("filename", "").strip()
+    print(f"[download] requested: {filename!r}")
+    if not filename or "/" in filename or "\\" in filename or ".." in filename:
+        return jsonify({"error": "잘못된 파일명입니다."}), 400
+
+    # 루트에서 직접 찾기 (정렬 전 파일)
+    direct = SAVE_ROOT / filename
+    print(f"[download] direct path: {direct}, exists: {direct.is_file()}")
+    if direct.is_file():
+        return send_file(direct, as_attachment=True, download_name=filename)
+
+    # 서브폴더 검색 (정렬된 파일)
+    for candidate in SAVE_ROOT.rglob(filename):
+        if candidate.is_file():
+            print(f"[download] found in subdir: {candidate}")
+            return send_file(candidate, as_attachment=True, download_name=filename)
+
+    print(f"[download] not found: {filename!r}, SAVE_ROOT={SAVE_ROOT}")
+    return jsonify({"error": "파일을 찾을 수 없습니다."}), 404
+
+
 if __name__ == "__main__":
     ensure_storage()
+    sort_existing_files()
     app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)

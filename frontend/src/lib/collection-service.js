@@ -1,7 +1,7 @@
 import {
-  addDoc,
   collection,
   doc,
+  increment,
   runTransaction,
   serverTimestamp,
 } from "firebase/firestore";
@@ -99,71 +99,6 @@ function normalizeBodyParts(value) {
 }
 
 // locations 문서는 보기 좋은 요약판 역할이라서 수집 성공 후 숫자만 같이 올립니다.
-async function syncLocationConsentSummary(locationMeta) {
-  const db = getFirebaseDb();
-  const locationRef = doc(db, "locations", locationMeta.docId);
-
-  await runTransaction(db, async (transaction) => {
-    const snapshot = await transaction.get(locationRef);
-    const currentData = snapshot.exists()
-      ? snapshot.data()
-      : createLocationSummary(locationMeta);
-
-    transaction.set(
-      locationRef,
-      {
-        ...createLocationSummary(locationMeta),
-        ...currentData,
-        Name: locationMeta.name,
-        DisplayName: locationMeta.displayName,
-        SiteCode: locationMeta.siteCode,
-        BodyParts: normalizeBodyParts(currentData?.BodyParts),
-        ConsentCount: Number(currentData?.ConsentCount || 0) + 1,
-        SessionCount: Number(currentData?.SessionCount || 0),
-        UpdatedAt: serverTimestamp(),
-      },
-      { merge: true },
-    );
-  });
-}
-
-async function syncLocationSessionSummary(locationMeta, bodyPartKey) {
-  const db = getFirebaseDb();
-  const locationRef = doc(db, "locations", locationMeta.docId);
-
-  await runTransaction(db, async (transaction) => {
-    const snapshot = await transaction.get(locationRef);
-    const currentData = snapshot.exists()
-      ? snapshot.data()
-      : createLocationSummary(locationMeta);
-    const nextBodyParts = normalizeBodyParts(currentData?.BodyParts);
-
-    nextBodyParts[bodyPartKey] = Number(nextBodyParts[bodyPartKey] || 0) + 1;
-
-    transaction.set(
-      locationRef,
-      {
-        ...createLocationSummary(locationMeta),
-        ...currentData,
-        Name: locationMeta.name,
-        DisplayName: locationMeta.displayName,
-        SiteCode: locationMeta.siteCode,
-        BodyParts: nextBodyParts,
-        ConsentCount: Number(currentData?.ConsentCount || 0),
-        SessionCount: Number(currentData?.SessionCount || 0) + 1,
-        UpdatedAt: serverTimestamp(),
-      },
-      { merge: true },
-    );
-  });
-}
-
-function syncLocationSummarySafely(task, fallbackMessage) {
-  return task.catch((error) => {
-    console.warn(fallbackMessage, error);
-  });
-}
-
 function formatMemberCode(value) {
   const parsedValue = Number(value || 0);
 
@@ -216,6 +151,7 @@ export async function ensureCollectorConsentAtLocation(session) {
         };
       }
 
+      const locationRef = doc(db, "locations", locationMeta.docId);
       transaction.set(participantRef, {
         UserId: session?.userId || "",
         UserNumber: Number(session?.userNumber || 0),
@@ -232,18 +168,23 @@ export async function ensureCollectorConsentAtLocation(session) {
         UpdatedAt: serverTimestamp(),
       });
 
+      transaction.set(
+        locationRef,
+        {
+          Name: locationMeta.name,
+          DisplayName: locationMeta.displayName,
+          SiteCode: locationMeta.siteCode,
+          ConsentCount: increment(1),
+          UpdatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+
       return {
         created: true,
         id: participantRef.id,
       };
     });
-
-    if (result.created) {
-      await syncLocationSummarySafely(
-        syncLocationConsentSummary(locationMeta),
-        "Failed to sync location consent summary.",
-      );
-    }
 
     return result;
   } catch (error) {
@@ -274,7 +215,9 @@ export async function saveCollectionRecording({
     const postureType = normalizePostureType(session?.postureType);
     const bodyPartCode = getPostureCode(bodyPartKey, postureType);
 
-    const sessionDoc = await addDoc(collection(db, "collectionSessions"), {
+    const sessionRef = doc(collection(db, "collectionSessions"));
+    const locationRef = doc(db, "locations", locationMeta.docId);
+    const sessionPayload = {
       UserId: session?.userId || "",
       UserNumber: Number(session?.userNumber || 0),
       MemberCode: session?.memberCode || formatMemberCode(session?.userNumber),
@@ -301,16 +244,20 @@ export async function saveCollectionRecording({
       DepthMetadataFileName: depth?.metadataFileName || "",
       DepthRawSize: Number(depth?.rawSize || 0),
       CreatedAt: serverTimestamp(),
-    });
+    };
 
-    await syncLocationSummarySafely(
-      syncLocationSessionSummary(locationMeta, bodyPartKey),
-      "Failed to sync location session summary.",
-    );
+    await runTransaction(db, async (transaction) => {
+      transaction.set(sessionRef, sessionPayload);
+      transaction.update(locationRef, {
+        SessionCount: increment(1),
+        [`BodyParts.${bodyPartKey}`]: increment(1),
+        UpdatedAt: serverTimestamp(),
+      });
+    });
 
     return {
       ok: true,
-      sessionId: sessionDoc.id,
+      sessionId: sessionRef.id,
     };
   } catch (error) {
     throw new Error(

@@ -108,6 +108,7 @@ service cloud.firestore {
         isSignedIn() &&
         hasOnlyKeys([
           "UserId",
+          "UserDocId",
           "UserNumber",
           "MemberCode",
           "Name",
@@ -122,6 +123,7 @@ service cloud.firestore {
           "UpdatedAt"
         ]) &&
         isNonEmptyString(request.resource.data.UserId) &&
+        (!("UserDocId" in request.resource.data) || request.resource.data.UserDocId is string) &&
         request.resource.data.UserNumber is int &&
         isNonEmptyString(request.resource.data.MemberCode) &&
         isNonEmptyString(request.resource.data.Name) &&
@@ -143,6 +145,7 @@ service cloud.firestore {
         isSignedIn() &&
         hasOnlyKeys([
           "UserId",
+          "UserDocId",
           "UserNumber",
           "MemberCode",
           "Name",
@@ -170,6 +173,7 @@ service cloud.firestore {
           "CreatedAt"
         ]) &&
         isNonEmptyString(request.resource.data.UserId) &&
+        (!("UserDocId" in request.resource.data) || request.resource.data.UserDocId is string) &&
         request.resource.data.UserNumber is int &&
         isNonEmptyString(request.resource.data.MemberCode) &&
         isNonEmptyString(request.resource.data.Name) &&

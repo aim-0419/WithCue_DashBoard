@@ -67,7 +67,7 @@ async function fetchJson(path, options = {}) {
   return result;
 }
 
-async function findLocalRealSenseCamera() {
+export async function findLocalRealSenseCamera() {
   try {
     const result = await fetchJson("/api/cameras");
     const camera = (result.cameras || []).find(
@@ -99,6 +99,7 @@ export function CollectionPage({
   logoutCountdownLabel,
   canOpenDashboard,
   onOpenDashboard,
+  initialRealSenseCamera,
 }) {
   const videoRef = useRef(null);
   const serverPreviewRef = useRef(null);
@@ -107,10 +108,10 @@ export function CollectionPage({
   const chunksRef = useRef([]);
   const recordingStartedAtRef = useRef(0);
 
-  const [selectedDeviceId, setSelectedDeviceId] = useState("");
+  const [selectedDeviceId, setSelectedDeviceId] = useState(REALSENSE_DEVICE_ID);
   const [cameraDevices, setCameraDevices] = useState([]);
-  const [localRealSenseCamera, setLocalRealSenseCamera] = useState(null);
-  const [selectedBodyPartKey, setSelectedBodyPartKey] = useState("Neck");
+  const [localRealSenseCamera, setLocalRealSenseCamera] = useState(initialRealSenseCamera ?? null);
+  const [selectedBodyPartKey, setSelectedBodyPartKey] = useState("");
   const [selectedPostureType, setSelectedPostureType] = useState(
     session?.postureType === "incorrect" ? "incorrect" : "correct",
   );
@@ -168,8 +169,12 @@ export function CollectionPage({
   }, [activeSession]);
 
   useEffect(() => {
-    let ignore = false;
+    // 프리로딩된 값이 있으면(null 포함) 별도 API 호출을 건너뜁니다.
+    if (initialRealSenseCamera !== undefined) {
+      return;
+    }
 
+    let ignore = false;
     findLocalRealSenseCamera().then((camera) => {
       if (!ignore) {
         setLocalRealSenseCamera(camera);
@@ -179,13 +184,7 @@ export function CollectionPage({
     return () => {
       ignore = true;
     };
-  }, []);
-
-  useEffect(() => {
-    if (localRealSenseCamera && !selectedDeviceId) {
-      setSelectedDeviceId(REALSENSE_DEVICE_ID);
-    }
-  }, [localRealSenseCamera, selectedDeviceId]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function stopBrowserPreview() {
     if (streamRef.current) {
@@ -336,6 +335,28 @@ export function CollectionPage({
       const recording = result.recording || {};
       const durationMs = Date.now() - recordingStartedAtRef.current;
 
+      const filesToDownload = [
+        recording.file_name,
+        ...(recording.depth ? [
+          recording.depth_raw_file_name,
+          recording.depth_index_file_name,
+          recording.depth_metadata_file_name,
+        ] : []),
+      ].filter(Boolean);
+
+      for (const fileName of filesToDownload) {
+        try {
+          const response = await fetch(`${LOCAL_BACKEND_ORIGIN}/api/download?filename=${encodeURIComponent(fileName)}`);
+          if (response.ok) {
+            const blob = await response.blob();
+            downloadBlobFile(blob, fileName);
+          }
+        } catch {
+          // 파일 다운로드 실패가 전체 흐름을 막지 않도록 합니다.
+        }
+      }
+
+      setStatusMessage("촬영 통계를 Firebase에 반영하고 있습니다.");
       await saveCollectionRecording({
         session: activeSession,
         bodyPartKey: selectedBodyPartKey,
@@ -372,6 +393,15 @@ export function CollectionPage({
 
   async function handleStartRecording(bodyPartKey = selectedBodyPartKey) {
     const targetBodyPart = getBodyPartOption(bodyPartKey);
+
+    try {
+      setStatusMessage("촬영 통계 권한을 확인하고 있습니다.");
+      await ensureCollectorConsentAtLocation(activeSession);
+    } catch (error) {
+      setErrorMessage(error?.message || "촬영 통계를 기록할 권한을 확인하지 못했습니다.");
+      setStatusMessage("통계 기록 권한을 먼저 확인해 주세요.");
+      return;
+    }
 
     if (isLocalRealSenseSelected) {
       await handleStartRealSenseRecording(bodyPartKey);
@@ -627,7 +657,7 @@ export function CollectionPage({
             <div className="collection-action-box">
               <p className="collection-action-box__label">현재 선택</p>
               <strong className="collection-action-box__value">
-                {postureLabel} {activeBodyPart.label}
+                {selectedBodyPartKey ? `${postureLabel} ${activeBodyPart.label}` : "부위를 선택해 주세요"}
               </strong>
             </div>
 
@@ -636,9 +666,9 @@ export function CollectionPage({
                 type="button"
                 className="auth-submit"
                 onClick={() => openManualBeforeRecording(selectedBodyPartKey)}
-                disabled={isRecording || isSaving}
+                disabled={!selectedBodyPartKey || isRecording || isSaving}
               >
-                {isSaving ? "저장 중..." : isRecording ? "녹화 중" : `${activeBodyPart.label} 녹화 시작`}
+                {isSaving ? "저장 중..." : isRecording ? "녹화 중" : selectedBodyPartKey ? `${activeBodyPart.label} 녹화 시작` : "부위를 선택해 주세요"}
               </button>
               <button
                 type="button"

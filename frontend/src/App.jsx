@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AdminDashboardPage } from "./components/AdminDashboardPage.jsx";
 import { AuthPage } from "./components/AuthPage.jsx";
-import { CollectionPage } from "./components/CollectionPage.jsx";
+import { CollectionPage, findLocalRealSenseCamera } from "./components/CollectionPage.jsx";
 import { categoryPages, pageMeta } from "./data/dashboard-meta.js";
 import { useDashboardData } from "./hooks/useDashboardData.js";
 import { useIdleLogout } from "./hooks/useIdleLogout.js";
@@ -92,10 +92,17 @@ export default function App() {
     readJsonFromStorage(AUTH_COLLECTOR_SESSION_KEY),
   );
   const [authNotice, setAuthNotice] = useState("");
+  const [preloadedRealSenseCamera, setPreloadedRealSenseCamera] = useState(undefined);
   const [adjustmentDrawerOpen, setAdjustmentDrawerOpen] = useState(false);
   const [adjustmentSubmitting, setAdjustmentSubmitting] = useState(false);
   const [deletingAdjustmentId, setDeletingAdjustmentId] = useState("");
   const { data, loading, refresh } = useDashboardData();
+
+  useEffect(() => {
+    findLocalRealSenseCamera().then((camera) => {
+      setPreloadedRealSenseCamera(camera);
+    });
+  }, []);
 
   const sessionRoles = getSessionRoles(authSession);
   const hasAdminSession = sessionRoles.includes("admin");
@@ -119,6 +126,7 @@ export default function App() {
     };
   }, []);
 
+  // 관리자 세션이 살아 있으면 항상 대시보드 흐름을 우선합니다.
   useEffect(() => {
     if (!authSession) {
       return;
@@ -140,6 +148,7 @@ export default function App() {
     }
   }, [authSession, hasAdminSession, view]);
 
+  // 수집 세션이 있으면 로그인 화면 대신 바로 촬영 화면으로 복귀시킵니다.
   useEffect(() => {
     if (hasAdminSession) {
       return;
@@ -316,6 +325,7 @@ export default function App() {
     navigateTo({ view: "login" });
   }, []);
 
+  // 관리자와 수집 권한을 동시에 가진 계정은 다시 로그인하지 않고 화면만 전환합니다.
   const handleGoToCollectorLogin = useCallback(() => {
     if (!authSession || !getSessionRoles(authSession).includes("collector")) {
       return;
@@ -462,6 +472,7 @@ export default function App() {
         logoutCountdownLabel={logoutCountdownLabel}
         canOpenDashboard={collectorCanOpenDashboard}
         onOpenDashboard={handleOpenDashboardFromCollector}
+        initialRealSenseCamera={preloadedRealSenseCamera}
       />
     );
   }
