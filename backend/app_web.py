@@ -41,18 +41,18 @@ SYNC_SCRIPT = PROJECT_ROOT / "backend" / "scripts" / "sync-locations.mjs"
 DESKTOP_DIR = Path.home() / "Desktop"
 SAVE_ROOT = DESKTOP_DIR / "Data_Auto"
 PARTICIPANTS_CSV = SAVE_ROOT / "participants.csv"
+# 실제 학습용 촬영물은 여기 밑에 {부위}/{참여자ID}/{회차}/ 구조로 쌓인다.
+DATASET_ROOT = SAVE_ROOT / "dataset"
 SITE_CONFIG = {
     "aim": {"code": "A", "label": "AIM"},
-    "hyocheon": {"code": "H", "label": "효천점"},
-    "jangdeok": {"code": "J", "label": "장덕점"},
 }
 PART_DIRS = {
-    "목": SAVE_ROOT / "Neck",
-    "허리": SAVE_ROOT / "Hip",
-    "왼쪽 어깨": SAVE_ROOT / "L_Shoulder",
-    "오른쪽 어깨": SAVE_ROOT / "R_Shoulder",
-    "왼쪽 무릎": SAVE_ROOT / "L_Knee",
-    "오른쪽 무릎": SAVE_ROOT / "R_Knee",
+    "목": DATASET_ROOT / "Neck",
+    "허리": DATASET_ROOT / "Hip",
+    "왼쪽 어깨": DATASET_ROOT / "L_Shoulder",
+    "오른쪽 어깨": DATASET_ROOT / "R_Shoulder",
+    "왼쪽 무릎": DATASET_ROOT / "L_Knee",
+    "오른쪽 무릎": DATASET_ROOT / "R_Knee",
 }
 SORT_TARGETS = {
     "01": ("Neck", False),
@@ -70,14 +70,6 @@ SORT_TARGETS = {
 }
 DEPTH_SIDECAR_SUFFIXES = (".depth.raw", ".depth.csv", ".depth.json")
 SORT_SKIP_FILES = {"participants.csv"}
-PART_CODES = {
-    "목": "01",
-    "허리": "02",
-    "왼쪽 어깨": "03",
-    "오른쪽 어깨": "04",
-    "왼쪽 무릎": "05",
-    "오른쪽 무릎": "06",
-}
 CSV_HEADERS = [
     "participant_id",
     "name",
@@ -877,8 +869,13 @@ class CameraManager:
         if output_path is None:
             return None
 
+        # 회차 폴더마다 파일명이 전부 "color.mp4"로 동일하므로, 다운로드 식별용으로는
+        # bare 파일명이 아니라 SAVE_ROOT 기준 상대경로를 써야 회차끼리 안 섞인다.
+        def relative_name(path: Path) -> str:
+            return path.relative_to(SAVE_ROOT).as_posix()
+
         details: dict[str, object] = {
-            "file_name": output_path.name,
+            "file_name": relative_name(output_path),
             "file_path": str(output_path),
             "mime_type": "video/mp4",
             "source_type": self.source_type or "",
@@ -893,12 +890,12 @@ class CameraManager:
                 {
                     "depth": True,
                     "depth_frame_count": int(self.depth_frame_count),
-                    "depth_raw_file_name": depth_raw_path.name,
+                    "depth_raw_file_name": relative_name(depth_raw_path),
                     "depth_raw_file_path": str(depth_raw_path),
                     "depth_raw_size": depth_raw_path.stat().st_size,
-                    "depth_index_file_name": depth_index_path.name,
+                    "depth_index_file_name": relative_name(depth_index_path),
                     "depth_index_file_path": str(depth_index_path),
-                    "depth_metadata_file_name": depth_metadata_path.name,
+                    "depth_metadata_file_name": relative_name(depth_metadata_path),
                     "depth_metadata_file_path": str(depth_metadata_path),
                 }
             )
@@ -917,7 +914,6 @@ def ensure_storage() -> None:
     SAVE_ROOT.mkdir(parents=True, exist_ok=True)
     for path in PART_DIRS.values():
         path.mkdir(parents=True, exist_ok=True)
-        (path / f"W_{path.name}").mkdir(parents=True, exist_ok=True)
     if not PARTICIPANTS_CSV.exists():
         with PARTICIPANTS_CSV.open("w", newline="", encoding="utf-8-sig") as file:
             writer = csv.DictWriter(file, fieldnames=CSV_HEADERS)
@@ -1051,42 +1047,20 @@ def get_or_create_participant(
     return participant_id, True
 
 
-def normalize_posture_type(value: str | None) -> str:
-    return "incorrect" if value == "incorrect" else "correct"
+def get_next_recording_path(participant_id: str, part_name: str) -> Path:
+    # dataset/{부위}/{참여자ID}/{회차}/color.mp4 구조. 회차 폴더 하나 = 촬영 1회(rep) 전체 산출물.
+    participant_dir = PART_DIRS[part_name] / participant_id
+    participant_dir.mkdir(parents=True, exist_ok=True)
 
-
-def get_recording_part_code(part_name: str, posture_type: str | None) -> str:
-    part_code = PART_CODES[part_name]
-    if normalize_posture_type(posture_type) == "incorrect":
-        return f"{part_code}1"
-    return part_code
-
-
-def get_recording_target_dir(part_name: str, posture_type: str | None) -> Path:
-    part_dir = PART_DIRS[part_name]
-    if normalize_posture_type(posture_type) == "incorrect":
-        return part_dir / f"W_{part_dir.name}"
-    return part_dir
-
-
-def get_next_recording_path(
-    participant_id: str,
-    part_name: str,
-    site_code: str,
-    posture_type: str | None = None,
-) -> Path:
-    part_code = get_recording_part_code(part_name, posture_type)
-    target_dir = get_recording_target_dir(part_name, posture_type)
-    app.logger.warning(f"[path] part_name={part_name!r} target_dir={target_dir}")
     highest_take = 0
-    for file_path in target_dir.glob(f"{site_code}_{part_code}_{participant_id}_*.mp4"):
-        stem_parts = file_path.stem.split("_")
-        if len(stem_parts) >= 4 and stem_parts[3].isdigit():
-            highest_take = max(highest_take, int(stem_parts[3]))
-    next_take = f"{highest_take + 1:03d}"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    result = target_dir / f"{site_code}_{part_code}_{participant_id}_{next_take}.mp4"
-    app.logger.warning(f"[path] output_path={result}")
+    for entry in participant_dir.iterdir():
+        if entry.is_dir() and entry.name.isdigit():
+            highest_take = max(highest_take, int(entry.name))
+
+    take_dir = participant_dir / f"{highest_take + 1:03d}"
+    take_dir.mkdir(parents=True, exist_ok=True)
+    result = take_dir / "color.mp4"
+    app.logger.warning(f"[path] part_name={part_name!r} output_path={result}")
     return result
 
 
@@ -1206,9 +1180,6 @@ def record_start():
     participant_id = str(payload.get("participant_id", "")).strip()
     part_name = str(payload.get("part_name", "")).strip()
     camera_index = payload.get("camera_index")
-    posture_type = normalize_posture_type(str(payload.get("posture_type", "correct")).strip())
-    site_key = str(payload.get("site_key", "aim")).strip()
-    site_config = get_site_config(site_key)
     app.logger.warning(f"[record_start] part_name={part_name!r} participant_id={participant_id!r}")
 
     if not participant_id:
@@ -1221,7 +1192,7 @@ def record_start():
 
     try:
         camera_manager.open_camera(int(camera_index))
-        output_path = get_next_recording_path(participant_id, part_name, site_config["code"], posture_type)
+        output_path = get_next_recording_path(participant_id, part_name)
         app.logger.warning(f"[record_start] output_path={output_path}")
         recording = camera_manager.start_recording(output_path)
     except Exception as error:
@@ -1256,25 +1227,29 @@ def video_feed():
 
 @app.get("/api/download")
 def download_recording_file():
-    filename = request.args.get("filename", "").strip()
-    print(f"[download] requested: {filename!r}")
-    if not filename or "/" in filename or "\\" in filename or ".." in filename:
-        return jsonify({"error": "잘못된 파일명입니다."}), 400
+    # 회차 폴더마다 파일명이 같은 "color.mp4"라서, SAVE_ROOT 기준 상대경로로 정확히 지정받는다.
+    raw_path = request.args.get("filename", "").strip()
+    print(f"[download] requested: {raw_path!r}")
+    if not raw_path:
+        return jsonify({"error": "잘못된 경로입니다."}), 400
 
-    # 루트에서 직접 찾기 (정렬 전 파일)
-    direct = SAVE_ROOT / filename
-    print(f"[download] direct path: {direct}, exists: {direct.is_file()}")
-    if direct.is_file():
-        return send_file(direct, as_attachment=True, download_name=filename)
+    relative_path = Path(raw_path)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        return jsonify({"error": "잘못된 경로입니다."}), 400
 
-    # 서브폴더 검색 (정렬된 파일)
-    for candidate in SAVE_ROOT.rglob(filename):
-        if candidate.is_file():
-            print(f"[download] found in subdir: {candidate}")
-            return send_file(candidate, as_attachment=True, download_name=filename)
+    candidate = (SAVE_ROOT / relative_path).resolve()
+    try:
+        candidate.relative_to(SAVE_ROOT.resolve())
+    except ValueError:
+        return jsonify({"error": "잘못된 경로입니다."}), 400
 
-    print(f"[download] not found: {filename!r}, SAVE_ROOT={SAVE_ROOT}")
-    return jsonify({"error": "파일을 찾을 수 없습니다."}), 404
+    if not candidate.is_file():
+        print(f"[download] not found: {candidate}")
+        return jsonify({"error": "파일을 찾을 수 없습니다."}), 404
+
+    # 브라우저 다운로드함에서는 회차별로 구분되게 경로를 이어붙인 이름으로 저장한다.
+    download_name = "_".join(relative_path.parts)
+    return send_file(candidate, as_attachment=True, download_name=download_name)
 
 
 if __name__ == "__main__":

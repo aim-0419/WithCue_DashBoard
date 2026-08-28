@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { formatBirthDateInput, normalizeBirthDateInput } from "../lib/birthdate.js";
 
 const genderOptions = [
@@ -6,11 +6,8 @@ const genderOptions = [
   { value: "female", label: "여" },
 ];
 
-const locationOptions = [
-  { value: "hyocheon", label: "효천점" },
-  { value: "jangdeok", label: "장덕점" },
-  { value: "aim", label: "AIM" },
-];
+// 지점은 AIM 하나뿐이라 선택 UI 없이 항상 이 값으로 고정함.
+const FIXED_LOCATION = "aim";
 
 // 현재 화면 상태만 바꾸고 나머지 쿼리는 최대한 유지함.
 function buildQuery(nextView) {
@@ -28,23 +25,6 @@ function GenderSelector({ value, onChange }) {
           type="button"
           key={option.value}
           className={`auth-choice${value === option.value ? " is-active" : ""}`}
-          onClick={() => onChange(option.value)}
-        >
-          {option.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function LocationSelector({ value, onChange }) {
-  return (
-    <div className="auth-location-grid" role="group" aria-label="지점 선택">
-      {locationOptions.map((option) => (
-        <button
-          type="button"
-          key={option.value}
-          className={`auth-location${value === option.value ? " is-active" : ""}`}
           onClick={() => onChange(option.value)}
         >
           {option.label}
@@ -105,13 +85,11 @@ function AuthForm({ mode, onLogin, onSignup }) {
     name: "",
     birthDate: "",
     gender: "male",
-    location: "",
+    location: FIXED_LOCATION,
     consentAgreed: false,
   });
   const [errorMessage, setErrorMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const aimTapResetTimerRef = useRef(null);
-  const [aimTapCount, setAimTapCount] = useState(0);
 
   const isLogin = mode === "login" || mode === "admin-login";
   const isAdminLogin = mode === "admin-login";
@@ -131,54 +109,9 @@ function AuthForm({ mode, onLogin, onSignup }) {
     return result.ok ? result.display : "";
   }, [form.birthDate]);
 
-  useEffect(() => {
-    return () => {
-      if (aimTapResetTimerRef.current) {
-        window.clearTimeout(aimTapResetTimerRef.current);
-      }
-    };
-  }, []);
-
   function updateField(key, value) {
     setForm((prev) => ({ ...prev, [key]: value }));
     setErrorMessage("");
-  }
-
-  function handleLocationChange(location) {
-    updateField("location", location);
-
-    if (mode !== "login") {
-      return;
-    }
-
-    if (location !== "aim") {
-      setAimTapCount(0);
-      if (aimTapResetTimerRef.current) {
-        window.clearTimeout(aimTapResetTimerRef.current);
-        aimTapResetTimerRef.current = null;
-      }
-      return;
-    }
-
-    setAimTapCount((prev) => {
-      const nextCount = prev + 1;
-
-      if (aimTapResetTimerRef.current) {
-        window.clearTimeout(aimTapResetTimerRef.current);
-      }
-
-      aimTapResetTimerRef.current = window.setTimeout(() => {
-        setAimTapCount(0);
-        aimTapResetTimerRef.current = null;
-      }, 4000);
-
-      if (nextCount >= 5) {
-        window.location.href = buildQuery("admin-login");
-        return 0;
-      }
-
-      return nextCount;
-    });
   }
 
   async function handleSubmit(event) {
@@ -193,11 +126,6 @@ function AuthForm({ mode, onLogin, onSignup }) {
     const birthDateResult = normalizeBirthDateInput(form.birthDate);
     if (!birthDateResult.ok) {
       setErrorMessage(birthDateResult.message);
-      return;
-    }
-
-    if (mode === "login" && !form.location) {
-      setErrorMessage("로그인할 지점을 선택해 주세요.");
       return;
     }
 
@@ -261,13 +189,6 @@ function AuthForm({ mode, onLogin, onSignup }) {
         <GenderSelector value={form.gender} onChange={(gender) => updateField("gender", gender)} />
       </div>
 
-      {mode === "login" ? (
-        <div className="auth-field">
-          <span className="auth-field__label">지점 선택</span>
-          <LocationSelector value={form.location} onChange={handleLocationChange} />
-        </div>
-      ) : null}
-
       {isSignup ? (
         <ConsentField
           agreed={form.consentAgreed}
@@ -321,7 +242,7 @@ export function AuthPage({ mode = "login", notice = "", onLogin, onSignup }) {
                   ? "관리자 계정으로 로그인하면 대시보드에 바로 접근할 수 있습니다."
                   : mode === "signup"
                     ? "개인정보 동의 후 회원가입을 진행합니다."
-                    : "회원가입한 이름, 생년월일, 성별을 입력하고 지점을 선택하면 수집 화면으로 이동합니다."}
+                    : "회원가입한 이름, 생년월일, 성별을 입력하면 수집 화면으로 이동합니다."}
               </p>
 
               {notice ? <p className="auth-message auth-message--notice">{notice}</p> : null}

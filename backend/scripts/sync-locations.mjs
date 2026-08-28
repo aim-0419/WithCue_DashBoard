@@ -7,8 +7,10 @@ import { doc, getFirestore, serverTimestamp, setDoc } from "firebase/firestore";
 
 import { firebaseConfig } from "./firebase-config.mjs";
 
-// 로컬 촬영 결과를 어느 Firestore 문서에 반영할지 지점별로 매핑해 둔다.
+// 로컬 촬영 결과를 어느 Firestore 문서에 반영할지 매핑해 둔다.
+// 지점은 이제 AIM(Company) 하나뿐 — HyoCheon/Jangdeok은 과거 기록이라 이 스크립트로는 더 이상 갱신하지 않는다.
 const SAVE_ROOT = path.join(os.homedir(), "Desktop", "Data_Auto");
+const DATASET_ROOT = path.join(SAVE_ROOT, "dataset");
 const PARTICIPANTS_CSV = path.join(SAVE_ROOT, "participants.csv");
 
 const LOCATION_CONFIG = {
@@ -16,16 +18,6 @@ const LOCATION_CONFIG = {
     siteCode: "A",
     name: "회사",
     displayName: "AIM",
-  },
-  HyoCheon: {
-    siteCode: "H",
-    name: "효천점",
-    displayName: "이끌림(효천)",
-  },
-  Jangdeok: {
-    siteCode: "J",
-    name: "장덕점",
-    displayName: "이끌림(장덕)",
   },
 };
 
@@ -66,25 +58,34 @@ function readCsvRows(filePath) {
   });
 }
 
-function countVideoFiles(directoryPath, siteCode) {
-  // 지점 코드로 시작하는 mp4만 세서 각 지점별 촬영 건수를 분리한다.
-  if (!fs.existsSync(directoryPath)) {
+function countVideoFiles(bodyPartDir) {
+  // dataset/{부위}/{참여자ID}/{회차}/color.mp4 구조를 순회하며 회차(rep) 개수를 센다.
+  if (!fs.existsSync(bodyPartDir)) {
     return 0;
   }
 
-  return fs
-    .readdirSync(directoryPath, { withFileTypes: true })
-    .filter((entry) => entry.isFile())
-    .filter((entry) => entry.name.toLowerCase().endsWith(".mp4"))
-    .filter((entry) => entry.name.startsWith(`${siteCode}_`)).length;
+  let count = 0;
+  for (const participantEntry of fs.readdirSync(bodyPartDir, { withFileTypes: true })) {
+    if (!participantEntry.isDirectory()) {
+      continue;
+    }
+
+    const participantDir = path.join(bodyPartDir, participantEntry.name);
+    for (const takeEntry of fs.readdirSync(participantDir, { withFileTypes: true })) {
+      if (takeEntry.isDirectory() && fs.existsSync(path.join(participantDir, takeEntry.name, "color.mp4"))) {
+        count += 1;
+      }
+    }
+  }
+
+  return count;
 }
 
 function buildLocationPayload(documentId, participantRows) {
   // CSV 동의 수와 부위별 로컬 파일 수를 Firestore locations 문서 형태로 합친다.
   const config = LOCATION_CONFIG[documentId];
   const bodyParts = Object.entries(BODY_PART_FOLDERS).reduce((accumulator, [fieldKey, folderName]) => {
-    const folderPath = path.join(SAVE_ROOT, folderName);
-    accumulator[fieldKey] = countVideoFiles(folderPath, config.siteCode);
+    accumulator[fieldKey] = countVideoFiles(path.join(DATASET_ROOT, folderName));
     return accumulator;
   }, {});
 

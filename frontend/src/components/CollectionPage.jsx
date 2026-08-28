@@ -5,12 +5,12 @@ import {
   ensureCollectorConsentAtLocation,
   formatBirthDateChip,
   formatGenderLabel,
-  formatPostureLabel,
-  getLocationChipLabel,
   saveCollectionRecording,
 } from "../lib/collection-service.js";
 
-const AUTH_COLLECTOR_SESSION_KEY = "withcue-collector-session";
+// 정답/오답 구분 없이 수집만 함. 라벨링은 후처리에서 진행하므로 항상 고정값을 씀.
+const FIXED_POSTURE_TYPE = "correct";
+
 const RECORDER_CANDIDATES = [
   "video/webm;codecs=vp9",
   "video/webm;codecs=vp8",
@@ -112,9 +112,6 @@ export function CollectionPage({
   const [cameraDevices, setCameraDevices] = useState([]);
   const [localRealSenseCamera, setLocalRealSenseCamera] = useState(initialRealSenseCamera ?? null);
   const [selectedBodyPartKey, setSelectedBodyPartKey] = useState("");
-  const [selectedPostureType, setSelectedPostureType] = useState(
-    session?.postureType === "incorrect" ? "incorrect" : "correct",
-  );
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -129,9 +126,9 @@ export function CollectionPage({
   const activeSession = useMemo(
     () => ({
       ...session,
-      postureType: selectedPostureType,
+      postureType: FIXED_POSTURE_TYPE,
     }),
-    [selectedPostureType, session],
+    [session],
   );
   const activeBodyPart = useMemo(
     () => getBodyPartOption(selectedBodyPartKey),
@@ -147,20 +144,7 @@ export function CollectionPage({
     [cameraDevices, localRealSenseCamera],
   );
   const isLocalRealSenseSelected = selectedDeviceId === REALSENSE_DEVICE_ID;
-  const postureLabel = formatPostureLabel(selectedPostureType);
-  const recordingStatusLabel = `${displayProfile?.name || "참여자"}님 ${postureLabel} ${activeBodyPart.label} 녹화중`;
-
-  useEffect(() => {
-    setSelectedPostureType(session?.postureType === "incorrect" ? "incorrect" : "correct");
-  }, [session?.postureType]);
-
-  useEffect(() => {
-    const nextSession = {
-      ...session,
-      postureType: selectedPostureType,
-    };
-    window.localStorage.setItem(AUTH_COLLECTOR_SESSION_KEY, JSON.stringify(nextSession));
-  }, [selectedPostureType, session]);
+  const recordingStatusLabel = `${displayProfile?.name || "참여자"}님 ${activeBodyPart.label} 녹화중`;
 
   useEffect(() => {
     ensureCollectorConsentAtLocation(activeSession).catch(() => {
@@ -185,6 +169,14 @@ export function CollectionPage({
       ignore = true;
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    // RealSense가 없는 PC에서는 기본 선택값을 일반 웹캠 쪽으로 바꿔줘야
+    // getUserMedia 경로로 넘어가서 실제 연결된 웹캠이 잡힘.
+    if (localRealSenseCamera === null) {
+      setSelectedDeviceId((prev) => (prev === REALSENSE_DEVICE_ID ? "" : prev));
+    }
+  }, [localRealSenseCamera]);
 
   function stopBrowserPreview() {
     if (streamRef.current) {
@@ -308,14 +300,14 @@ export function CollectionPage({
           participant_id: registerResult.participant_id,
           part_name: bodyPartName,
           camera_index: REALSENSE_CAMERA_INDEX,
-          posture_type: selectedPostureType,
+          posture_type: FIXED_POSTURE_TYPE,
           site_key: activeSession?.location || "aim",
         }),
       });
 
       recordingStartedAtRef.current = Date.now();
       setIsRecording(true);
-      setStatusMessage(`${postureLabel} ${targetBodyPart.label} RealSense RGB+Depth 녹화를 시작했습니다.`);
+      setStatusMessage(`${targetBodyPart.label} RealSense RGB+Depth 녹화를 시작했습니다.`);
     } catch (error) {
       setIsRecording(false);
       setErrorMessage(error?.message || "RealSense 녹화를 시작할 수 없습니다.");
@@ -467,7 +459,7 @@ export function CollectionPage({
 
       mediaRecorder.start();
       setIsRecording(true);
-      setStatusMessage(`${postureLabel} ${targetBodyPart.label} 녹화를 시작했습니다.`);
+      setStatusMessage(`${targetBodyPart.label} 녹화를 시작했습니다.`);
     } catch {
       setErrorMessage("브라우저에서 녹화를 시작할 수 없습니다.");
     }
@@ -541,11 +533,9 @@ export function CollectionPage({
         </header>
 
         <section className="collection-chip-row" aria-label="참여자 정보">
-          <span className="collection-chip">수집 위치: {getLocationChipLabel(activeSession?.location)}</span>
           <span className="collection-chip">이름: {displayProfile?.name || "-"}</span>
           <span className="collection-chip">성별: {formatGenderLabel(displayProfile?.gender)}</span>
           <span className="collection-chip">생년월일: {formatBirthDateChip(displayProfile?.birthDate)}</span>
-          <span className="collection-chip">유형: {postureLabel}</span>
         </section>
 
         <section className="collection-grid">
@@ -614,28 +604,6 @@ export function CollectionPage({
             <div className="collection-panel__section">
               <div className="collection-inline-header">
                 <h2>촬영 부위 선택</h2>
-                <div className="collection-posture-toggle" aria-label="정답 오답 선택">
-                  <button
-                    type="button"
-                    className={`collection-posture-button${
-                      selectedPostureType === "correct" ? " is-active" : ""
-                    }`}
-                    onClick={() => setSelectedPostureType("correct")}
-                    disabled={isRecording || isSaving}
-                  >
-                    정답
-                  </button>
-                  <button
-                    type="button"
-                    className={`collection-posture-button${
-                      selectedPostureType === "incorrect" ? " is-active" : ""
-                    }`}
-                    onClick={() => setSelectedPostureType("incorrect")}
-                    disabled={isRecording || isSaving}
-                  >
-                    오답
-                  </button>
-                </div>
               </div>
               <div className="collection-body-grid">
                 {BODY_PART_OPTIONS.map((bodyPart) => (
@@ -657,7 +625,7 @@ export function CollectionPage({
             <div className="collection-action-box">
               <p className="collection-action-box__label">현재 선택</p>
               <strong className="collection-action-box__value">
-                {selectedBodyPartKey ? `${postureLabel} ${activeBodyPart.label}` : "부위를 선택해 주세요"}
+                {selectedBodyPartKey ? activeBodyPart.label : "부위를 선택해 주세요"}
               </strong>
             </div>
 

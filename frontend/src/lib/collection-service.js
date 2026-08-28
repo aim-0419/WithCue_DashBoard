@@ -66,13 +66,15 @@ const EMPTY_BODY_PARTS = {
   RightShoulder: 0,
 };
 
+// 정답/오답 구분 없이 수집만 하므로 파일명·기록은 항상 "correct" 고정값을 씀.
+const FIXED_POSTURE_TYPE = "correct";
+
 function normalizePostureType(value) {
   return value === "incorrect" ? "incorrect" : "correct";
 }
 
-function getPostureCode(bodyPartKey, postureType) {
-  const baseCode = BODY_PART_CODE_MAP[bodyPartKey] || "00";
-  return normalizePostureType(postureType) === "incorrect" ? `${baseCode}1` : baseCode;
+function getBodyPartCode(bodyPartKey) {
+  return BODY_PART_CODE_MAP[bodyPartKey] || "00";
 }
 
 function getLocationMeta(locationKey) {
@@ -134,11 +136,10 @@ export async function ensureCollectorConsentAtLocation(session) {
 
     const db = getFirebaseDb();
     const locationMeta = getLocationMeta(session?.location);
-    const postureType = normalizePostureType(session?.postureType);
     const participantRef = doc(
       db,
       "locationParticipants",
-      `${session?.userId || "unknown"}_${locationMeta.docId}_${postureType}`,
+      `${session?.userId || "unknown"}_${locationMeta.docId}_${FIXED_POSTURE_TYPE}`,
     );
 
     const result = await runTransaction(db, async (transaction) => {
@@ -162,8 +163,8 @@ export async function ensureCollectorConsentAtLocation(session) {
         Location: session?.location || "aim",
         LocationDocId: locationMeta.docId,
         SiteCode: locationMeta.siteCode,
-        PostureType: postureType,
-        PostureCode: postureType === "incorrect" ? "1" : "0",
+        PostureType: FIXED_POSTURE_TYPE,
+        PostureCode: "0",
         CreatedAt: serverTimestamp(),
         UpdatedAt: serverTimestamp(),
       });
@@ -212,8 +213,7 @@ export async function saveCollectionRecording({
     const locationMeta = getLocationMeta(session?.location);
     const bodyPartOption =
       BODY_PART_OPTIONS.find((option) => option.key === bodyPartKey) || BODY_PART_OPTIONS[0];
-    const postureType = normalizePostureType(session?.postureType);
-    const bodyPartCode = getPostureCode(bodyPartKey, postureType);
+    const bodyPartCode = getBodyPartCode(bodyPartKey);
 
     const sessionRef = doc(collection(db, "collectionSessions"));
     const locationRef = doc(db, "locations", locationMeta.docId);
@@ -230,8 +230,8 @@ export async function saveCollectionRecording({
       BodyPart: bodyPartKey,
       BodyPartCode: bodyPartCode,
       BodyPartLabel: bodyPartOption.label,
-      PostureType: postureType,
-      PostureCode: postureType === "incorrect" ? "1" : "0",
+      PostureType: FIXED_POSTURE_TYPE,
+      PostureCode: "0",
       FileName: fileName,
       MimeType: mimeType,
       FileSize: Number(size || 0),
@@ -269,7 +269,7 @@ export async function saveCollectionRecording({
 // 파일명은 지점 코드 - 부위 코드 - 회원 코드 형식으로 고정합니다.
 export function buildRecordingFileName(session, bodyPartKey) {
   const locationMeta = getLocationMeta(session?.location);
-  const bodyPartCode = getPostureCode(bodyPartKey, session?.postureType);
+  const bodyPartCode = getBodyPartCode(bodyPartKey);
   const memberCode = session?.memberCode || formatMemberCode(session?.userNumber);
 
   return `${locationMeta.siteCode}-${bodyPartCode}-${memberCode}.webm`;
