@@ -120,6 +120,7 @@ export function CollectionPage({
   const [downloadMessage, setDownloadMessage] = useState("");
   const [manualBodyPartKey, setManualBodyPartKey] = useState("");
   const [isManualOpen, setIsManualOpen] = useState(false);
+  const seenManualKeysRef = useRef(new Set());
   const [manualVideoFailed, setManualVideoFailed] = useState(false);
 
   const displayProfile = profile || session;
@@ -327,26 +328,8 @@ export function CollectionPage({
       const recording = result.recording || {};
       const durationMs = Date.now() - recordingStartedAtRef.current;
 
-      const filesToDownload = [
-        recording.file_name,
-        ...(recording.depth ? [
-          recording.depth_raw_file_name,
-          recording.depth_index_file_name,
-          recording.depth_metadata_file_name,
-        ] : []),
-      ].filter(Boolean);
-
-      for (const fileName of filesToDownload) {
-        try {
-          const response = await fetch(`${LOCAL_BACKEND_ORIGIN}/api/download?filename=${encodeURIComponent(fileName)}`);
-          if (response.ok) {
-            const blob = await response.blob();
-            downloadBlobFile(blob, fileName);
-          }
-        } catch {
-          // 파일 다운로드 실패가 전체 흐름을 막지 않도록 합니다.
-        }
-      }
+      // 실제 파일은 로컬 카메라 서버가 dataset/ 폴더에 이미 저장했으므로,
+      // 브라우저 다운로드함에 별도 사본을 또 내려받지 않는다.
 
       setStatusMessage("촬영 통계를 Firebase에 반영하고 있습니다.");
       await saveCollectionRecording({
@@ -478,13 +461,23 @@ export function CollectionPage({
     mediaRecorderRef.current.stop();
   }
 
-  function openManualBeforeRecording(bodyPartKey) {
+  function openManualBeforeRecording(bodyPartKey, forceShow = false, autoStartIfSeen = true) {
     if (isRecording || isSaving) {
       return;
     }
 
-    const targetBodyPart = getBodyPartOption(bodyPartKey);
     setSelectedBodyPartKey(bodyPartKey);
+
+    // 같은 부위는 이번 세션에서 이미 매뉴얼을 봤으면 다시 안 띄움.
+    // 부위 타일 클릭(선택)만으로 바로 녹화가 시작되면 놀라니, "녹화 시작" 버튼을 눌렀을 때만 즉시 시작한다.
+    if (!forceShow && seenManualKeysRef.current.has(bodyPartKey)) {
+      if (autoStartIfSeen) {
+        handleStartRecording(bodyPartKey);
+      }
+      return;
+    }
+
+    const targetBodyPart = getBodyPartOption(bodyPartKey);
     setManualBodyPartKey(bodyPartKey);
     setManualVideoFailed(false);
     setIsManualOpen(true);
@@ -502,6 +495,7 @@ export function CollectionPage({
 
   async function closeManualAndStartRecording() {
     const bodyPartKey = manualBodyPartKey || selectedBodyPartKey;
+    seenManualKeysRef.current.add(bodyPartKey);
     setIsManualOpen(false);
     setManualVideoFailed(false);
     setManualBodyPartKey("");
@@ -613,7 +607,7 @@ export function CollectionPage({
                     className={`collection-body-button${
                       selectedBodyPartKey === bodyPart.key ? " is-active" : ""
                     }`}
-                    onClick={() => openManualBeforeRecording(bodyPart.key)}
+                    onClick={() => openManualBeforeRecording(bodyPart.key, false, false)}
                     disabled={isRecording || isSaving}
                   >
                     {bodyPart.label}
@@ -627,6 +621,16 @@ export function CollectionPage({
               <strong className="collection-action-box__value">
                 {selectedBodyPartKey ? activeBodyPart.label : "부위를 선택해 주세요"}
               </strong>
+              {selectedBodyPartKey ? (
+                <button
+                  type="button"
+                  className="dashboard-secondary-action"
+                  onClick={() => openManualBeforeRecording(selectedBodyPartKey, true)}
+                  disabled={isRecording || isSaving}
+                >
+                  매뉴얼 다시보기
+                </button>
+              ) : null}
             </div>
 
             <div className="collection-action-row">
