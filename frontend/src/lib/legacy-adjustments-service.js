@@ -1,78 +1,48 @@
-import {
-  addDoc,
-  collection,
-  deleteDoc,
-  doc,
-  getDocs,
-  limit,
-  query,
-  serverTimestamp,
-  where,
-} from "firebase/firestore";
-import {
-  BODY_PART_OPTIONS,
-  LOCATION_META,
-  formatPostureLabel,
-} from "./collection-service.js";
-import { getFirebaseDb, waitForFirebaseAuthReady } from "./firebase-client.js";
+import { apiRequest, waitForFirebaseAuthReady } from "./firebase-client.js";
 
-const BODY_PART_CODE_MAP = {
-  Neck: "01",
-  Hip: "02",
-  LeftShoulder: "03",
-  RightShoulder: "04",
-  LeftKnee: "05",
-  RightKnee: "06",
-};
+async function requireSignedInUser() {
+  const user = await waitForFirebaseAuthReady();
 
-function getLocationMeta(locationKey) {
-  return LOCATION_META[locationKey] || LOCATION_META.aim;
+  if (!user) {
+    throw new Error("인증 상태가 만료되었습니다. 다시 로그인해 주세요.");
+  }
+
+  return user;
 }
 
-function getBodyPartOption(bodyPartKey) {
-  return BODY_PART_OPTIONS.find((option) => option.key === bodyPartKey) || BODY_PART_OPTIONS[0];
-}
-
-function normalizePostureType(value) {
-  return value === "incorrect" ? "incorrect" : "correct";
-}
-
+// 회원번호 검색은 서버(관리자 전용)에서 하고, 이름·회원번호·회원코드만 받는다.
 export async function findUserByUserNumber(userNumber) {
-  await waitForFirebaseAuthReady();
-
   const normalizedUserNumber = Number(userNumber || 0);
 
   if (!Number.isInteger(normalizedUserNumber) || normalizedUserNumber <= 0) {
     throw new Error("회원번호는 1 이상의 숫자로 입력해 주세요.");
   }
 
-  const db = getFirebaseDb();
-  const userQuery = query(
-    collection(db, "users"),
-    where("UserNumber", "==", normalizedUserNumber),
-    limit(1),
+  const result = await apiRequest(
+    `/api/admin/lookup-user?userNumber=${encodeURIComponent(normalizedUserNumber)}`,
+    { method: "GET" },
   );
-  const snapshot = await getDocs(userQuery);
 
-  if (snapshot.empty) {
+  if (!result.ok) {
+    throw new Error(result.message || "회원 검색 중 오류가 발생했습니다.");
+  }
+
+  if (!result.user) {
     return null;
   }
 
-  const userDoc = snapshot.docs[0];
-  const userData = userDoc.data();
-
   return {
-    id: userDoc.id,
-    name: userData.Name || "",
-    userNumber: Number(userData.UserNumber || 0),
-    memberCode: userData.MemberCode || "",
-    birthDate: Number(userData.BirthDate || 0),
-    gender: userData.Gender || "",
+    id: result.user.id,
+    name: result.user.name || "",
+    userNumber: Number(result.user.userNumber || 0),
+    memberCode: result.user.memberCode || "",
   };
 }
 
+// 보정 기록 추가·삭제는 서버 API(/api/admin/adjustments)가 관리자 허용 목록을 매번 확인한 뒤 처리한다.
+// 브라우저는 Firestore에 직접 쓰지 않는다. 대상 회원의 이름·회원번호·회원코드와 작성자는 서버가 채운다.
+// 호출부가 넘기는 adminSession은 쓰지 않는다(작성자는 서버가 관리자 토큰에서 정함).
 export async function createLegacyAdjustment({
-  adminSession,
   location,
   bodyPartKey,
   postureType,
@@ -81,12 +51,8 @@ export async function createLegacyAdjustment({
   note,
   targetUser,
 }) {
-  await waitForFirebaseAuthReady();
+  await requireSignedInUser();
 
-  const db = getFirebaseDb();
-  const locationMeta = getLocationMeta(location);
-  const bodyPartOption = getBodyPartOption(bodyPartKey);
-  const normalizedPostureType = normalizePostureType(postureType);
   const normalizedSessionDelta = Number(sessionDelta || 0);
   const normalizedConsentDelta = Number(consentDelta || 0);
 
@@ -98,37 +64,38 @@ export async function createLegacyAdjustment({
     throw new Error("반영할 회원번호를 먼저 검색해 주세요.");
   }
 
-  await addDoc(collection(db, "legacyAdjustments"), {
-    Location: location,
-    LocationDocId: locationMeta.docId,
-    SiteCode: locationMeta.siteCode,
-    BodyPart: bodyPartKey,
-    BodyPartCode: BODY_PART_CODE_MAP[bodyPartKey] || "00",
-    BodyPartLabel: bodyPartOption.label,
-    PostureType: normalizedPostureType,
-    PostureCode: normalizedPostureType === "incorrect" ? "1" : "0",
-    PostureLabel: formatPostureLabel(normalizedPostureType),
-    SessionDelta: normalizedSessionDelta,
-    ConsentDelta: normalizedConsentDelta,
-    Note: String(note || "").trim(),
-    TargetUserId: targetUser.id,
-    TargetUserName: targetUser.name,
-    TargetUserNumber: Number(targetUser.userNumber || 0),
-    TargetMemberCode: targetUser.memberCode || "",
-    CreatedByName: adminSession?.name || "",
-    CreatedByUserId: adminSession?.userId || "",
-    CreatedAt: serverTimestamp(),
-    UpdatedAt: serverTimestamp(),
+  const result = await apiRequest("/api/admin/adjustments", {
+    body: {
+      location,
+      bodyPartKey,
+      postureType: postureType === "incorrect" ? "incorrect" : "correct",
+      sessionDelta: normalizedSessionDelta,
+      consentDelta: normalizedConsentDelta,
+      note: String(note || "").trim(),
+      targetUserId: targetUser.id,
+    },
   });
+
+  if (!result.ok) {
+    throw new Error(result.message || "보정 데이터를 저장하지 못했습니다.");
+  }
+
+  return result.id;
 }
 
 export async function deleteLegacyAdjustment(adjustmentId) {
-  await waitForFirebaseAuthReady();
+  await requireSignedInUser();
 
   if (!adjustmentId) {
     throw new Error("삭제할 보정 데이터가 없습니다.");
   }
 
-  const db = getFirebaseDb();
-  await deleteDoc(doc(db, "legacyAdjustments", adjustmentId));
+  const result = await apiRequest(
+    `/api/admin/adjustments?id=${encodeURIComponent(adjustmentId)}`,
+    { method: "DELETE" },
+  );
+
+  if (!result.ok) {
+    throw new Error(result.message || "보정 데이터를 삭제하지 못했습니다.");
+  }
 }

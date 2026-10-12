@@ -5,7 +5,21 @@ import { CollectionPage, findLocalRealSenseCamera } from "./components/Collectio
 import { categoryPages, pageMeta } from "./data/dashboard-meta.js";
 import { useDashboardData } from "./hooks/useDashboardData.js";
 import { useIdleLogout } from "./hooks/useIdleLogout.js";
-import { clearFirebaseSession, loginUser, signUpUser } from "./lib/auth-service.js";
+import {
+  SESSION_STORAGE_KEYS,
+  clearFirebaseSession,
+  clearStoredSessions,
+  isAdminClaims,
+  isCollectorClaims,
+  linkAdminProfile,
+  loginAdminWithGoogle,
+  loginUser,
+  removeStoredCollectorProfile,
+  restoreSession,
+  signUpUser,
+  storeCollectorProfile,
+  subscribeAuthUser,
+} from "./lib/auth-service.js";
 import {
   getDisplayedConsentCount,
   getDisplayedSessionCount,
@@ -17,33 +31,14 @@ import {
   deleteLegacyAdjustment,
 } from "./lib/legacy-adjustments-service.js";
 
-const AUTH_PROFILE_KEY = "withcue-auth-profile";
-const AUTH_ADMIN_SESSION_KEY = "withcue-admin-session";
-const AUTH_COLLECTOR_SESSION_KEY = "withcue-collector-session";
 const POSTURE_FILTERS = ["all", "correct", "incorrect"];
-
-function getSessionRoles(session) {
-  if (Array.isArray(session?.roles) && session.roles.length > 0) {
-    return session.roles;
-  }
-
-  if (session?.role === "admin") {
-    return ["admin"];
-  }
-
-  if (session?.role === "collector") {
-    return ["collector"];
-  }
-
-  return [];
-}
+const VIEWS = ["dashboard", "login", "signup", "admin-login", "collect", "link-profile"];
+const ADMIN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 function getViewFromLocation() {
   const params = new URLSearchParams(window.location.search);
   const view = params.get("view") || "login";
-  return ["dashboard", "login", "signup", "admin-login", "collect"].includes(view)
-    ? view
-    : "login";
+  return VIEWS.includes(view) ? view : "login";
 }
 
 function getPageKeyFromLocation() {
@@ -58,22 +53,9 @@ function getPostureFilterFromLocation() {
   return POSTURE_FILTERS.includes(posture) ? posture : "all";
 }
 
-function readJsonFromStorage(key) {
-  try {
-    const value = window.localStorage.getItem(key);
-    return value ? JSON.parse(value) : null;
-  } catch {
-    return null;
-  }
-}
-
 function navigateTo(paramsObject) {
   const params = new URLSearchParams(paramsObject);
   window.history.replaceState({}, "", `/?${params.toString()}`);
-}
-
-function persistCollectorSession(session) {
-  window.localStorage.setItem(AUTH_COLLECTOR_SESSION_KEY, JSON.stringify(session));
 }
 
 function getNextPostureFilter(currentPostureType) {
@@ -82,21 +64,55 @@ function getNextPostureFilter(currentPostureType) {
   return POSTURE_FILTERS[nextIndex];
 }
 
+// 화면 표시용 세션. 권한은 claims(role/roles/userDocId)에서만 가져온다.
+function buildAdminSession(session, claims) {
+  return {
+    ...session,
+    role: "admin",
+    roles: claims.roles,
+  };
+}
+
+function buildCollectorSession(session, claims) {
+  return {
+    ...session,
+    role: "collector",
+    roles: claims.roles,
+    location: session?.location || "aim",
+    postureType: "correct",
+  };
+}
+
+function removeLegacyStoredProfiles() {
+  // 이전 버전이 남긴 관리자 세션·개인정보 프로필 캐시는 더 이상 쓰지 않으므로 지운다.
+  try {
+    window.localStorage.removeItem(SESSION_STORAGE_KEYS.admin);
+    window.localStorage.removeItem(SESSION_STORAGE_KEYS.legacyProfile);
+  } catch {
+    // 무시
+  }
+}
+
 export default function App() {
+  const [booting, setBooting] = useState(true);
   const [view, setView] = useState(getViewFromLocation());
   const [pageKey, setPageKey] = useState(getPageKeyFromLocation());
   const [postureFilter, setPostureFilter] = useState(getPostureFilterFromLocation());
-  const [authProfile, setAuthProfile] = useState(() => readJsonFromStorage(AUTH_PROFILE_KEY));
-  const [authSession, setAuthSession] = useState(() => readJsonFromStorage(AUTH_ADMIN_SESSION_KEY));
-  const [collectorSession, setCollectorSession] = useState(() =>
-    readJsonFromStorage(AUTH_COLLECTOR_SESSION_KEY),
-  );
+  // Firebase ID 토큰 claims(role, roles, userDocId). 모든 권한 판정의 기준.
+  const [authClaims, setAuthClaims] = useState(null);
+  const [authSession, setAuthSession] = useState(null);
+  const [collectorSession, setCollectorSession] = useState(null);
   const [authNotice, setAuthNotice] = useState("");
   const [preloadedRealSenseCamera, setPreloadedRealSenseCamera] = useState(undefined);
   const [adjustmentDrawerOpen, setAdjustmentDrawerOpen] = useState(false);
   const [adjustmentSubmitting, setAdjustmentSubmitting] = useState(false);
   const [deletingAdjustmentId, setDeletingAdjustmentId] = useState("");
-  const { data, loading, refresh } = useDashboardData();
+
+  const hasAdminSession = Boolean(authSession) && isAdminClaims(authClaims);
+  const isCollectorSession = Boolean(collectorSession) && isCollectorClaims(authClaims);
+  const collectorCanOpenDashboard = isCollectorSession && isAdminClaims(authClaims);
+
+  const { data, loading, refresh } = useDashboardData({ enabled: hasAdminSession });
 
   useEffect(() => {
     findLocalRealSenseCamera().then((camera) => {
@@ -104,11 +120,38 @@ export default function App() {
     });
   }, []);
 
-  const sessionRoles = getSessionRoles(authSession);
-  const hasAdminSession = sessionRoles.includes("admin");
-  const adminCanOpenCollector = sessionRoles.includes("collector");
-  const isCollectorSession = Boolean(collectorSession);
-  const collectorCanOpenDashboard = getSessionRoles(collectorSession).includes("admin");
+  // 시작 시 Firebase 로그인 상태와 claims로 세션을 복원한다. 없으면 저장된 표시용 프로필은 버린다.
+  useEffect(() => {
+    let cancelled = false;
+    removeLegacyStoredProfiles();
+
+    restoreSession()
+      .catch(() => null)
+      .then((restored) => {
+        if (cancelled) {
+          return;
+        }
+
+        if (!restored) {
+          clearStoredSessions();
+        } else if (restored.kind === "admin") {
+          removeStoredCollectorProfile();
+          setAuthClaims(restored.claims);
+          setAuthSession(buildAdminSession(restored.session, restored.claims));
+        } else {
+          const nextCollectorSession = buildCollectorSession(restored.session, restored.claims);
+          storeCollectorProfile(nextCollectorSession);
+          setAuthClaims(restored.claims);
+          setCollectorSession(nextCollectorSession);
+        }
+
+        setBooting(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const handleLocationChange = () => {
@@ -126,14 +169,38 @@ export default function App() {
     };
   }, []);
 
-  // 관리자 세션이 살아 있으면 항상 대시보드 흐름을 우선합니다.
+  const resetLocalSession = useCallback(() => {
+    clearStoredSessions();
+    setAuthClaims(null);
+    setAuthSession(null);
+    setCollectorSession(null);
+    setAdjustmentDrawerOpen(false);
+    setView("login");
+    navigateTo({ view: "login" });
+  }, []);
+
+  // 다른 탭 로그아웃·세션 만료 등으로 Firebase 사용자가 사라지면 화면 세션도 정리한다.
   useEffect(() => {
-    if (!authSession) {
+    if (booting || (!authSession && !collectorSession)) {
+      return undefined;
+    }
+
+    return subscribeAuthUser((user) => {
+      // 로그아웃(null)뿐 아니라 다른 탭에서 다른 사용자로 로그인해 uid 가 바뀐 경우에도 화면 세션을 버린다.
+      // 그대로 두면 이 탭은 이전 사용자 프로필을 보여 주면서 API 호출은 새 사용자로 나가 기록이 엇갈린다.
+      if (!user || (authClaims?.uid && user.uid !== authClaims.uid)) {
+        resetLocalSession();
+      }
+    });
+  }, [authClaims, authSession, booting, collectorSession, resetLocalSession]);
+
+  // 관리자 세션이 살아 있으면 항상 대시보드 흐름을 우선합니다(정보 연결 화면은 예외).
+  useEffect(() => {
+    if (booting || !authSession) {
       return;
     }
 
     if (!hasAdminSession) {
-      window.localStorage.removeItem(AUTH_ADMIN_SESSION_KEY);
       setAuthSession(null);
       setView("login");
       navigateTo({ view: "login" });
@@ -146,29 +213,29 @@ export default function App() {
       setPostureFilter("all");
       navigateTo({ page: "main", posture: "all" });
     }
-  }, [authSession, hasAdminSession, view]);
+  }, [authSession, booting, hasAdminSession, view]);
 
   // 수집 세션이 있으면 로그인 화면 대신 바로 촬영 화면으로 복귀시킵니다.
+  // 세션이 없으면 대시보드·수집·정보 연결 화면 요청은 로그인 화면으로 정규화합니다.
   useEffect(() => {
-    if (hasAdminSession) {
+    if (booting || hasAdminSession) {
       return;
     }
 
-    if (!collectorSession && view === "collect") {
-      setView("login");
-      navigateTo({ view: "login" });
+    if (!isCollectorSession) {
+      if (["collect", "dashboard", "link-profile"].includes(view)) {
+        setView("login");
+        navigateTo({ view: "login" });
+      }
+
       return;
     }
 
-    if (!collectorSession) {
-      return;
-    }
-
-    if (["login", "signup", "admin-login"].includes(view)) {
+    if (["login", "signup", "admin-login", "dashboard", "link-profile"].includes(view)) {
       setView("collect");
       navigateTo({ view: "collect" });
     }
-  }, [collectorSession, hasAdminSession, view]);
+  }, [booting, hasAdminSession, isCollectorSession, view]);
 
   const dashboardData = data ?? {
     source: "loading",
@@ -212,9 +279,6 @@ export default function App() {
         return result;
       }
 
-      const profile = result.profile;
-      window.localStorage.setItem(AUTH_PROFILE_KEY, JSON.stringify(profile));
-      setAuthProfile(profile);
       setAuthNotice(result.message || "회원가입이 완료됐습니다. 같은 정보로 로그인해 주세요.");
       setView("login");
       navigateTo({ view: "login" });
@@ -227,7 +291,7 @@ export default function App() {
     }
   }
 
-  async function handleLogin(form, mode) {
+  async function handleLogin(form) {
     try {
       const result = await loginUser(form);
 
@@ -235,53 +299,23 @@ export default function App() {
         return result;
       }
 
-      const session = result.session;
-      const nextSessionRoles = getSessionRoles(session);
-
-      if (mode === "admin-login" && !nextSessionRoles.includes("admin")) {
-        return {
-          ok: false,
-          message: "관리자 대시보드는 관리자 계정으로만 접근할 수 있습니다.",
-        };
-      }
-
-      if (mode !== "admin-login" && !nextSessionRoles.includes("collector")) {
+      if (!isCollectorClaims(result.claims) || result.session?.userId !== result.claims.userDocId) {
+        await clearFirebaseSession().catch(() => {});
         return {
           ok: false,
           message: "이 계정은 일반 수집 권한이 없습니다. 관리자 로그인으로 접근해 주세요.",
         };
       }
 
+      const nextCollectorSession = buildCollectorSession(result.session, result.claims);
+
       setAuthNotice("");
-      window.localStorage.setItem(AUTH_PROFILE_KEY, JSON.stringify(session));
-      setAuthProfile(session);
-
-      if (mode === "admin-login") {
-        const adminSession = { ...session, role: "admin", roles: nextSessionRoles };
-        window.localStorage.setItem(AUTH_ADMIN_SESSION_KEY, JSON.stringify(adminSession));
-        window.localStorage.removeItem(AUTH_COLLECTOR_SESSION_KEY);
-        setCollectorSession(null);
-        setAuthSession(adminSession);
-        setView("dashboard");
-        setPageKey("main");
-        setPostureFilter("all");
-        navigateTo({ page: "main", posture: "all" });
-      } else {
-        const collectorSessionData = {
-          ...session,
-          role: nextSessionRoles.includes("collector") ? "collector" : session.role,
-          roles: nextSessionRoles,
-          postureType: "correct",
-        };
-
-        window.localStorage.removeItem(AUTH_ADMIN_SESSION_KEY);
-        persistCollectorSession(collectorSessionData);
-        setAuthSession(null);
-        setCollectorSession(collectorSessionData);
-        setView("collect");
-        navigateTo({ view: "collect" });
-      }
-
+      storeCollectorProfile(nextCollectorSession);
+      setAuthClaims(result.claims);
+      setAuthSession(null);
+      setCollectorSession(nextCollectorSession);
+      setView("collect");
+      navigateTo({ view: "collect" });
       return { ok: true };
     } catch (error) {
       return {
@@ -289,6 +323,64 @@ export default function App() {
         message: error?.message || "로그인 처리 중 알 수 없는 오류가 발생했습니다.",
       };
     }
+  }
+
+  async function handleAdminGoogleLogin() {
+    try {
+      const result = await loginAdminWithGoogle();
+
+      if (!result.ok) {
+        return result;
+      }
+
+      setAuthNotice("");
+      removeStoredCollectorProfile();
+      setAuthClaims(result.claims);
+      setCollectorSession(null);
+      setAuthSession(buildAdminSession(result.session, result.claims));
+      setView("dashboard");
+      setPageKey("main");
+      setPostureFilter("all");
+      navigateTo({ page: "main", posture: "all" });
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error?.message || "관리자 로그인 처리 중 알 수 없는 오류가 발생했습니다.",
+      };
+    }
+  }
+
+  // 관리자 계정에 본인 회원 정보를 연결한 뒤 바로 수집 화면으로 전환한다.
+  async function handleLinkProfile(form) {
+    try {
+      const result = await linkAdminProfile(form);
+
+      if (!result.ok) {
+        return result;
+      }
+
+      const nextCollectorSession = buildCollectorSession(result.session, result.claims);
+
+      storeCollectorProfile(nextCollectorSession);
+      setAuthClaims(result.claims);
+      setAuthSession(null);
+      setCollectorSession(nextCollectorSession);
+      setAdjustmentDrawerOpen(false);
+      setView("collect");
+      navigateTo({ view: "collect" });
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error?.message || "회원 정보 연결 중 알 수 없는 오류가 발생했습니다.",
+      };
+    }
+  }
+
+  function handleCancelLink() {
+    setView("dashboard");
+    navigateTo({ page: pageKey, posture: postureFilter });
   }
 
   function handleNavigatePage(nextPageKey) {
@@ -308,69 +400,59 @@ export default function App() {
     handleChangePostureType(nextPostureType);
   }
 
-  const handleAdminLogout = useCallback(async () => {
+  const handleLogout = useCallback(async () => {
     await clearFirebaseSession().catch(() => {});
-    window.localStorage.removeItem(AUTH_ADMIN_SESSION_KEY);
-    setAuthSession(null);
-    setAdjustmentDrawerOpen(false);
-    setView("login");
-    navigateTo({ view: "login" });
-  }, []);
-
-  const handleCollectorLogout = useCallback(async () => {
-    await clearFirebaseSession().catch(() => {});
-    window.localStorage.removeItem(AUTH_COLLECTOR_SESSION_KEY);
-    setCollectorSession(null);
-    setView("login");
-    navigateTo({ view: "login" });
-  }, []);
+    resetLocalSession();
+  }, [resetLocalSession]);
 
   // 관리자와 수집 권한을 동시에 가진 계정은 다시 로그인하지 않고 화면만 전환합니다.
+  // 아직 회원 정보가 연결되지 않은 관리자는 정보 연결 화면으로 보냅니다.
   const handleGoToCollectorLogin = useCallback(() => {
-    if (!authSession || !getSessionRoles(authSession).includes("collector")) {
+    if (!authSession || !isAdminClaims(authClaims)) {
       return;
     }
 
-    const collectorSessionData = {
-      ...authSession,
-      role: "collector",
-      roles: getSessionRoles(authSession),
-      postureType: "correct",
-    };
-
-    window.localStorage.removeItem(AUTH_ADMIN_SESSION_KEY);
-    persistCollectorSession(collectorSessionData);
-    setAuthSession(null);
-    setCollectorSession(collectorSessionData);
     setAdjustmentDrawerOpen(false);
+
+    if (!isCollectorClaims(authClaims) || authSession.userId !== authClaims.userDocId) {
+      setView("link-profile");
+      navigateTo({ view: "link-profile" });
+      return;
+    }
+
+    const nextCollectorSession = buildCollectorSession(authSession, authClaims);
+
+    storeCollectorProfile(nextCollectorSession);
+    setAuthSession(null);
+    setCollectorSession(nextCollectorSession);
     setView("collect");
     navigateTo({ view: "collect" });
-  }, [authSession]);
+  }, [authClaims, authSession]);
 
   const handleOpenDashboardFromCollector = useCallback(() => {
-    if (!collectorSession || !getSessionRoles(collectorSession).includes("admin")) {
+    if (!collectorSession || !isAdminClaims(authClaims)) {
       return;
     }
 
-    const adminSession = {
-      ...collectorSession,
-      role: "admin",
-      roles: getSessionRoles(collectorSession),
-    };
-
-    window.localStorage.setItem(AUTH_ADMIN_SESSION_KEY, JSON.stringify(adminSession));
-    window.localStorage.removeItem(AUTH_COLLECTOR_SESSION_KEY);
-    setAuthSession(adminSession);
+    removeStoredCollectorProfile();
+    setAuthSession(buildAdminSession(collectorSession, authClaims));
     setCollectorSession(null);
     setView("dashboard");
     setPageKey("main");
     setPostureFilter("all");
     navigateTo({ page: "main", posture: "all" });
-  }, [collectorSession]);
+  }, [authClaims, collectorSession]);
 
   const logoutCountdownLabel = useIdleLogout({
     enabled: isCollectorSession && view === "collect",
-    onLogout: handleCollectorLogout,
+    onLogout: handleLogout,
+  });
+
+  // 관리자 대시보드는 30분 무반응 시 로그아웃합니다(카운트다운은 표시하지 않음).
+  useIdleLogout({
+    enabled: hasAdminSession,
+    onLogout: handleLogout,
+    timeoutMs: ADMIN_IDLE_TIMEOUT_MS,
   });
 
   const handleSubmitAdjustment = useCallback(
@@ -411,12 +493,19 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (hasAdminSession) {
-      document.title = `WithCue 관리자 대시보드 - ${currentPage.title}`;
+    if (booting) {
       return;
     }
 
-    if (collectorSession) {
+    if (hasAdminSession) {
+      document.title =
+        view === "link-profile"
+          ? "WithCue 관리자 대시보드 - 수집 참여자 정보 연결"
+          : `WithCue 관리자 대시보드 - ${currentPage.title}`;
+      return;
+    }
+
+    if (isCollectorSession) {
       document.title = "WithCue 데이터 수집";
       return;
     }
@@ -432,7 +521,25 @@ export default function App() {
     }
 
     document.title = "WithCue 데이터 수집 - 로그인";
-  }, [collectorSession, currentPage.title, hasAdminSession, view]);
+  }, [booting, currentPage.title, hasAdminSession, isCollectorSession, view]);
+
+  if (booting) {
+    return (
+      <main className="dashboard dashboard--auth" aria-busy="true">
+        <p className="auth-boot">로그인 상태를 확인하고 있습니다.</p>
+      </main>
+    );
+  }
+
+  if (hasAdminSession && view === "link-profile") {
+    return (
+      <AuthPage
+        mode="link-profile"
+        onLinkProfile={handleLinkProfile}
+        onCancelLink={handleCancelLink}
+      />
+    );
+  }
 
   if (hasAdminSession) {
     return (
@@ -449,9 +556,9 @@ export default function App() {
         onNavigatePage={handleNavigatePage}
         onChangePostureType={handleChangePostureType}
         onCyclePostureType={handleCyclePostureType}
-        canGoToCollectorLogin={adminCanOpenCollector}
+        canGoToCollectorLogin
         onGoToCollectorLogin={handleGoToCollectorLogin}
-        onLogout={handleAdminLogout}
+        onLogout={handleLogout}
         adjustmentDrawerOpen={adjustmentDrawerOpen}
         onOpenAdjustmentDrawer={() => setAdjustmentDrawerOpen(true)}
         onCloseAdjustmentDrawer={() => setAdjustmentDrawerOpen(false)}
@@ -463,12 +570,11 @@ export default function App() {
     );
   }
 
-  if (collectorSession) {
+  if (isCollectorSession) {
     return (
       <CollectionPage
         session={collectorSession}
-        profile={authProfile}
-        onLogout={handleCollectorLogout}
+        onLogout={handleLogout}
         logoutCountdownLabel={logoutCountdownLabel}
         canOpenDashboard={collectorCanOpenDashboard}
         onOpenDashboard={handleOpenDashboardFromCollector}
@@ -478,6 +584,12 @@ export default function App() {
   }
 
   return (
-    <AuthPage mode={view} notice={authNotice} onLogin={handleLogin} onSignup={handleSignup} />
+    <AuthPage
+      mode={view}
+      notice={authNotice}
+      onLogin={handleLogin}
+      onSignup={handleSignup}
+      onAdminGoogleLogin={handleAdminGoogleLogin}
+    />
   );
 }

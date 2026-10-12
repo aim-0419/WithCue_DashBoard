@@ -1,294 +1,397 @@
-import { signOut } from "firebase/auth";
 import {
-  collection,
-  doc,
-  getDocs,
-  limit,
-  query,
-  runTransaction,
-  serverTimestamp,
-  setDoc,
-  where,
-} from "firebase/firestore";
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithCustomToken,
+  signInWithPopup,
+  signOut,
+} from "firebase/auth";
 import {
+  apiRequest,
   getFirebaseAuth,
-  getFirebaseDb,
   resetFirebaseAuthReady,
   waitForFirebaseAuthReady,
 } from "./firebase-client.js";
 
-const FIRESTORE_REQUEST_TIMEOUT_MS = 12000;
-const USER_COUNTER_DOC_PATH = ["systemCounters", "users"];
+// localStorage에는 표시용 프로필만 둔다. 권한 판정은 항상 Firebase ID 토큰 claims로 한다.
+export const SESSION_STORAGE_KEYS = {
+  admin: "withcue-admin-session",
+  collector: "withcue-collector-session",
+  legacyProfile: "withcue-auth-profile",
+};
 
-function normalizeName(value) {
-  return String(value || "").trim().normalize("NFC");
+export function clearStoredSessions() {
+  Object.values(SESSION_STORAGE_KEYS).forEach((key) => {
+    try {
+      window.localStorage.removeItem(key);
+    } catch {
+      // 저장소 접근이 막힌 환경에서도 로그아웃 흐름은 계속 진행함.
+    }
+  });
 }
 
-function formatMemberCode(value) {
-  const parsedValue = Number(value || 0);
-
-  if (!Number.isInteger(parsedValue) || parsedValue < 0) {
-    return "00";
+export function readStoredCollectorProfile() {
+  try {
+    const value = window.localStorage.getItem(SESSION_STORAGE_KEYS.collector);
+    return value ? JSON.parse(value) : null;
+  } catch {
+    return null;
   }
-
-  return String(parsedValue).padStart(2, "0");
 }
 
-function getUserRoles(user) {
-  if (Array.isArray(user.Roles) && user.Roles.length > 0) {
-    return user.Roles.filter((role) => role === "collector" || role === "admin");
+export function storeCollectorProfile(session) {
+  try {
+    window.localStorage.setItem(SESSION_STORAGE_KEYS.collector, JSON.stringify(session));
+  } catch {
+    // 표시용 캐시라 실패해도 세션 자체는 유지함.
   }
-
-  if (user.Role === "admin") {
-    return ["admin"];
-  }
-
-  return ["collector"];
 }
 
-// 수집 화면에서 바로 쓸 세션 정보만 추려서 만듦.
-function buildCollectorSession(user, location) {
-  const roles = getUserRoles(user);
-
-  return {
-    userId: user.id,
-    name: user.Name,
-    birthDate: user.BirthDate,
-    gender: user.Gender,
-    role: roles.includes("collector") ? "collector" : roles[0] || "collector",
-    roles,
-    location,
-    userNumber: user.UserNumber || 0,
-    memberCode: user.MemberCode || formatMemberCode(user.UserNumber),
-  };
+export function removeStoredCollectorProfile() {
+  try {
+    window.localStorage.removeItem(SESSION_STORAGE_KEYS.collector);
+  } catch {
+    // 무시
+  }
 }
 
-function toFriendlyFirebaseError(error, fallbackMessage) {
-  const code = error?.code || "";
+export function toFriendlyFirebaseError(error, fallbackMessage) {
+  const code = String(error?.code || "");
 
-  if (code.includes("deadline-exceeded") || code.includes("timeout")) {
-    return "Firebase 응답이 지연되고 있습니다. 잠시 후 다시 시도해 주세요.";
+  if (code.includes("popup-closed-by-user") || code.includes("cancelled-popup-request")) {
+    return "로그인 창이 닫혔습니다.";
   }
 
-  if (code.includes("permission-denied")) {
-    return "Firebase 접근 권한이 없습니다. Firestore 규칙을 확인해 주세요.";
-  }
-
-  if (code.includes("unauthenticated")) {
-    return "인증 상태가 만료되었습니다. 다시 로그인해 주세요.";
+  if (code.includes("popup-blocked")) {
+    return "브라우저가 로그인 창을 차단했습니다. 팝업 차단을 해제한 뒤 다시 시도해 주세요.";
   }
 
   if (code.includes("network-request-failed")) {
     return "네트워크 연결 상태를 확인해 주세요.";
   }
 
-  if (code.includes("already-exists")) {
-    return "이미 가입된 사용자 정보입니다.";
+  if (code.includes("too-many-requests")) {
+    return "요청이 너무 많습니다. 잠시 뒤 다시 시도해 주세요.";
   }
 
-  return error?.message || fallbackMessage;
+  if (code.includes("user-disabled")) {
+    return "사용이 중지된 계정입니다. 관리자에게 문의해 주세요.";
+  }
+
+  if (code.includes("account-exists-with-different-credential")) {
+    return "이미 다른 로그인 방식으로 등록된 계정입니다.";
+  }
+
+  if (code.includes("unauthorized-domain") || code.includes("operation-not-allowed")) {
+    return "이 주소에서는 Google 로그인을 사용할 수 없습니다. 관리자에게 문의해 주세요.";
+  }
+
+  if (code.includes("invalid-custom-token") || code.includes("custom-token-mismatch")) {
+    return "로그인 토큰이 올바르지 않습니다. 다시 로그인해 주세요.";
+  }
+
+  if (code.includes("user-token-expired") || code.includes("unauthenticated")) {
+    return "인증 상태가 만료되었습니다. 다시 로그인해 주세요.";
+  }
+
+  if (code.includes("deadline-exceeded") || code.includes("timeout")) {
+    return "응답이 지연되고 있습니다. 잠시 후 다시 시도해 주세요.";
+  }
+
+  if (code.includes("permission-denied")) {
+    return "접근 권한이 없습니다.";
+  }
+
+  return fallbackMessage || error?.message || "알 수 없는 오류가 발생했습니다.";
 }
 
-// Firestore 지연 시 무한 대기를 막기 위한 보호 로직임.
-// Firestore 응답 지연 시 무한 대기를 막음.
-function withTimeout(promise, timeoutMessage) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => {
-      window.setTimeout(() => {
-        reject({
-          code: "timeout",
-          message: timeoutMessage,
-        });
-      }, FIRESTORE_REQUEST_TIMEOUT_MS);
-    }),
-  ]);
-}
-
-async function findUsersByIdentity({ name, birthDate, gender }) {
-  const db = getFirebaseDb();
-  const normalizedName = normalizeName(name);
-  const usersRef = collection(db, "users");
-  const identityQuery = query(
-    usersRef,
-    where("BirthDate", "==", Number(birthDate)),
-    limit(30),
-  );
-  const snapshot = await getDocs(identityQuery);
-
-  return snapshot.docs
-    .map((snapshotDoc) => ({
-      id: snapshotDoc.id,
-      ...snapshotDoc.data(),
-    }))
-    .filter(
-      (user) => normalizeName(user.Name) === normalizedName && String(user.Gender || "") === gender,
-    );
-}
-
-// 기존 사용자 번호가 없으면 카운터 문서를 이용해 새 번호를 발급함.
-// 사용자 번호가 비어 있으면 카운터 문서에서 다음 번호를 발급함.
-async function ensureUserNumber(userId) {
-  const db = getFirebaseDb();
-  const userRef = doc(db, "users", userId);
-  const counterRef = doc(db, USER_COUNTER_DOC_PATH[0], USER_COUNTER_DOC_PATH[1]);
-
-  return runTransaction(db, async (transaction) => {
-    const userSnapshot = await transaction.get(userRef);
-
-    if (!userSnapshot.exists()) {
-      throw new Error("회원 문서를 찾을 수 없습니다.");
-    }
-
-    const user = userSnapshot.data();
-    const existingNumber = Number(user.UserNumber || 0);
-
-    if (Number.isInteger(existingNumber) && existingNumber > 0) {
-      return {
-        userNumber: existingNumber,
-        memberCode: user.MemberCode || formatMemberCode(existingNumber),
-      };
-    }
-
-    const counterSnapshot = await transaction.get(counterRef);
-    const nextUserNumber = Number(counterSnapshot.data()?.NextUserNumber || 1);
-    const memberCode = formatMemberCode(nextUserNumber);
-
-    transaction.set(
-      counterRef,
-      {
-        NextUserNumber: nextUserNumber + 1,
-      },
-      { merge: true },
-    );
-
-    transaction.update(userRef, {
-      UserNumber: nextUserNumber,
-      MemberCode: memberCode,
-      UpdatedAt: serverTimestamp(),
-    });
-
-    return {
-      userNumber: nextUserNumber,
-      memberCode,
-    };
-  });
-}
-
-// 회원가입 시 최소 필드를 먼저 만들고 번호를 뒤이어 발급함.
-// 회원가입 시 기본 문서를 만들고 사용자 번호를 이어서 발급함.
-async function createCollectorUser({ name, birthDate, gender, consentAgreed }) {
-  const db = getFirebaseDb();
-  const auth = getFirebaseAuth();
-  const normalizedName = normalizeName(name);
-  const userRef = doc(collection(db, "users"));
-
-  await setDoc(userRef, {
-    Name: normalizedName,
-    NameNormalized: normalizedName,
-    BirthDate: Number(birthDate),
-    Gender: gender,
-    ConsentAgreed: Boolean(consentAgreed),
-    ConsentAt: serverTimestamp(),
-    Role: "collector",
-    Roles: ["collector"],
-    UserNumber: 0,
-    MemberCode: "00",
-    AuthUid: auth.currentUser?.uid || "",
-    CreatedAt: serverTimestamp(),
-    UpdatedAt: serverTimestamp(),
-  });
-
-  const numberInfo = await ensureUserNumber(userRef.id);
+function normalizeClaims(claims) {
+  const roles = Array.isArray(claims?.roles)
+    ? claims.roles.filter((role) => role === "admin" || role === "collector")
+    : [];
 
   return {
-    id: userRef.id,
-    Name: normalizedName,
-    BirthDate: Number(birthDate),
-    Gender: gender,
-    Role: "collector",
-    Roles: ["collector"],
-    UserNumber: numberInfo.userNumber,
-    MemberCode: numberInfo.memberCode,
+    // 다른 탭에서 다른 사용자로 로그인한 경우를 감지하기 위해 토큰의 uid 도 함께 둔다.
+    uid: typeof claims?.user_id === "string" ? claims.user_id : typeof claims?.sub === "string" ? claims.sub : "",
+    role: typeof claims?.role === "string" ? claims.role : "",
+    roles,
+    userDocId: typeof claims?.userDocId === "string" ? claims.userDocId : "",
   };
 }
 
-// 익명 인증 UID 연결은 보조 정보이므로 실패해도 로그인은 계속 허용함.
+// 현재 Firebase 사용자의 ID 토큰 claims를 읽는다. forceRefresh면 서버가 바꾼 claims를 다시 받음.
+export async function getCurrentClaims({ forceRefresh = false } = {}) {
+  const user = await waitForFirebaseAuthReady();
+
+  if (!user) {
+    return null;
+  }
+
+  const tokenResult = await user.getIdTokenResult(forceRefresh);
+  return normalizeClaims(tokenResult.claims);
+}
+
+export function isAdminClaims(claims) {
+  return claims?.role === "admin";
+}
+
+export function isCollectorClaims(claims) {
+  return Boolean(claims?.roles?.includes("collector") && claims?.userDocId);
+}
+
+// Firebase 로그인 사용자 변화를 구독한다(다른 탭 로그아웃·세션 만료 감지용). 해제 함수를 반환.
+export function subscribeAuthUser(callback) {
+  try {
+    return onAuthStateChanged(getFirebaseAuth(), callback);
+  } catch {
+    return () => {};
+  }
+}
+
 export async function clearFirebaseSession() {
-  await signOut(getFirebaseAuth());
-  resetFirebaseAuthReady();
+  try {
+    await signOut(getFirebaseAuth());
+  } finally {
+    resetFirebaseAuthReady();
+  }
+}
+
+async function signOutQuietly() {
+  await clearFirebaseSession().catch(() => {});
 }
 
 export async function signUpUser({ name, birthDate, gender, consentAgreed }) {
-  try {
-    await waitForFirebaseAuthReady();
+  const result = await apiRequest("/api/auth/signup", {
+    auth: false,
+    body: { name, birthDate, gender, consentAgreed: consentAgreed === true },
+  });
 
-    const existingUsers = await withTimeout(
-      findUsersByIdentity({ name, birthDate, gender }),
-      "회원가입 요청 응답이 지연되고 있습니다.",
-    );
-
-    if (existingUsers.length > 0) {
-      return {
-        ok: false,
-        message: "이미 가입된 사용자 정보입니다.",
-      };
-    }
-
-    const createdUser = await withTimeout(
-      createCollectorUser({ name, birthDate, gender, consentAgreed }),
-      "회원가입 요청 응답이 지연되고 있습니다.",
-    );
-
-    return {
-      ok: true,
-      profile: {
-        userId: createdUser.id,
-        name: createdUser.Name,
-        birthDate: createdUser.BirthDate,
-        gender: createdUser.Gender,
-        role: createdUser.Role,
-        roles: createdUser.Roles || ["collector"],
-        userNumber: createdUser.UserNumber,
-        memberCode: createdUser.MemberCode,
-      },
-      message: "회원가입이 완료되었습니다. 같은 정보로 로그인해 주세요.",
-    };
-  } catch (error) {
+  if (!result.ok) {
     return {
       ok: false,
-      message: toFriendlyFirebaseError(error, "회원가입 처리 중 알 수 없는 오류가 발생했습니다."),
+      code: result.code,
+      message: result.message || "회원가입 처리 중 알 수 없는 오류가 발생했습니다.",
+    };
+  }
+
+  return {
+    ok: true,
+    alreadyRegistered: Boolean(result.alreadyRegistered),
+    profile: result.profile || null,
+    message: result.message || "회원가입이 완료됐습니다. 같은 정보로 로그인해 주세요.",
+  };
+}
+
+export async function loginUser({ name, birthDate, gender, location }) {
+  // 일반 수집 로그인은 Bearer 없이 호출해 관리자 연결 모드로 해석되지 않게 한다.
+  const result = await apiRequest("/api/auth/login", {
+    auth: false,
+    body: { name, birthDate, gender, location },
+  });
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      code: result.code,
+      message: result.message || "로그인 처리 중 알 수 없는 오류가 발생했습니다.",
+    };
+  }
+
+  if (!result.customToken || !result.session) {
+    return { ok: false, code: "server", message: "로그인 응답이 올바르지 않습니다." };
+  }
+
+  try {
+    await signInWithCustomToken(getFirebaseAuth(), result.customToken);
+    resetFirebaseAuthReady();
+    const claims = await getCurrentClaims();
+
+    return { ok: true, session: result.session, claims };
+  } catch (error) {
+    await signOutQuietly();
+    return {
+      ok: false,
+      code: error?.code || "auth",
+      message: toFriendlyFirebaseError(error, "로그인 처리 중 알 수 없는 오류가 발생했습니다."),
     };
   }
 }
 
-export async function loginUser({ name, birthDate, gender, location }) {
+// 현재 로그인된 Google 사용자로 관리자 세션을 서버에서 확인·갱신한다.
+async function requestAdminSession() {
+  const result = await apiRequest("/api/auth/admin-session", { body: {} });
+
+  if (!result.ok) {
+    return result;
+  }
+
+  const claims = await getCurrentClaims({ forceRefresh: true });
+
+  if (!isAdminClaims(claims)) {
+    return { ok: false, code: "not_admin", message: "관리자로 등록되지 않은 계정입니다." };
+  }
+
+  return { ok: true, session: result.session, claims };
+}
+
+export async function loginAdminWithGoogle() {
   try {
-    await waitForFirebaseAuthReady();
-
-    const matchedUsers = await withTimeout(
-      findUsersByIdentity({ name, birthDate, gender }),
-      "로그인 요청 응답이 지연되고 있습니다.",
-    );
-
-    if (matchedUsers.length === 0) {
-      return {
-        ok: false,
-        message: "회원가입한 정보와 일치하는 사용자를 찾을 수 없습니다.",
-      };
-    }
-
-    // 로그인 단계에서는 읽기만 수행해 권한 충돌 가능성을 줄임.
-    const matchedUser = matchedUsers[0];
-
-    return {
-      ok: true,
-      session: buildCollectorSession(matchedUser, location),
-    };
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: "select_account" });
+    await signInWithPopup(getFirebaseAuth(), provider);
+    resetFirebaseAuthReady();
   } catch (error) {
     return {
       ok: false,
-      message: toFriendlyFirebaseError(error, "로그인 처리 중 알 수 없는 오류가 발생했습니다."),
+      code: error?.code || "auth",
+      message: toFriendlyFirebaseError(error, "Google 로그인 중 오류가 발생했습니다."),
     };
   }
+
+  try {
+    const result = await requestAdminSession();
+
+    if (!result.ok) {
+      await signOutQuietly();
+      return {
+        ok: false,
+        code: result.code,
+        message: result.message || "관리자 로그인에 실패했습니다.",
+      };
+    }
+
+    return result;
+  } catch (error) {
+    await signOutQuietly();
+    return {
+      ok: false,
+      code: error?.code || "auth",
+      message: toFriendlyFirebaseError(error, "관리자 로그인 중 오류가 발생했습니다."),
+    };
+  }
+}
+
+// 관리자 계정에 본인 수집 참여자 정보를 한 번 연결한다(관리자 Bearer로 /api/auth/login 호출).
+export async function linkAdminProfile({ name, birthDate, gender, location }) {
+  const result = await apiRequest("/api/auth/login", {
+    body: { name, birthDate, gender, location },
+  });
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      code: result.code,
+      message: result.message || "회원 정보 연결 중 알 수 없는 오류가 발생했습니다.",
+    };
+  }
+
+  if (result.linked !== true || !result.session) {
+    return {
+      ok: false,
+      code: "not_linked",
+      message: "관리자 계정에 회원 정보를 연결하지 못했습니다. 다시 로그인해 주세요.",
+    };
+  }
+
+  try {
+    const claims = await getCurrentClaims({ forceRefresh: true });
+
+    if (!isAdminClaims(claims) || !isCollectorClaims(claims)) {
+      return {
+        ok: false,
+        code: "not_linked",
+        message: "연결 결과를 확인하지 못했습니다. 다시 로그인해 주세요.",
+      };
+    }
+
+    return { ok: true, session: result.session, claims };
+  } catch (error) {
+    return {
+      ok: false,
+      code: error?.code || "auth",
+      message: toFriendlyFirebaseError(error, "연결 결과를 확인하지 못했습니다."),
+    };
+  }
+}
+
+// 앱 시작 시 Firebase 로그인 상태와 claims로 세션을 복원한다.
+// 반환: { kind:"admin"|"collector", session, claims } 또는 null(재로그인 필요).
+export async function restoreSession() {
+  let user = null;
+
+  try {
+    user = await waitForFirebaseAuthReady();
+  } catch {
+    return null;
+  }
+
+  if (!user) {
+    return null;
+  }
+
+  let claims = null;
+
+  try {
+    claims = await getCurrentClaims();
+  } catch {
+    await signOutQuietly();
+    return null;
+  }
+
+  if (isAdminClaims(claims)) {
+    try {
+      const result = await requestAdminSession();
+
+      if (!result.ok) {
+        await signOutQuietly();
+        return null;
+      }
+
+      // 관리자-연결 계정이 수집 화면에 있다가 새로고침한 경우 수집 화면으로 되돌린다.
+      const storedCollector = readStoredCollectorProfile();
+
+      if (
+        isCollectorClaims(result.claims) &&
+        storedCollector?.userId &&
+        storedCollector.userId === result.claims.userDocId
+      ) {
+        return {
+          kind: "collector",
+          session: {
+            ...result.session,
+            role: "collector",
+            roles: result.claims.roles,
+            location: storedCollector.location || result.session?.location || "aim",
+            postureType: "correct",
+          },
+          claims: result.claims,
+        };
+      }
+
+      return { kind: "admin", session: result.session, claims: result.claims };
+    } catch {
+      await signOutQuietly();
+      return null;
+    }
+  }
+
+  if (isCollectorClaims(claims)) {
+    const storedCollector = readStoredCollectorProfile();
+
+    if (storedCollector?.userId && storedCollector.userId === claims.userDocId) {
+      return {
+        kind: "collector",
+        session: {
+          ...storedCollector,
+          role: "collector",
+          roles: claims.roles,
+          postureType: "correct",
+        },
+        claims,
+      };
+    }
+  }
+
+  // 표시용 프로필이 없거나 권한이 없으면 재로그인을 유도한다.
+  await signOutQuietly();
+  return null;
 }

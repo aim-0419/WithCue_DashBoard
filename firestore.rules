@@ -1,323 +1,43 @@
 rules_version = '2';
+
+// 브라우저(클라이언트 SDK)는 Firestore를 전혀 직접 다루지 않는다.
+// 모든 접근은 서버 API(api/**)의 Admin SDK로만 한다. Admin SDK는 이 규칙을 거치지 않는다.
+// 관리자 권한은 서버가 매 요청마다 ID 토큰 + 허용 목록(ADMIN_EMAILS)으로 확인하므로,
+// 목록에서 빠진 관리자에게 role claim이 남아 있어도 Firestore에 직접 접근할 길이 없다.
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
-    function isNonEmptyString(value) {
-      return value is string && value.size() > 0;
-    }
-
-    function isValidGender(value) {
-      return value in ["male", "female"];
-    }
-
-    function isValidBirthDate(value) {
-      return value is int && value >= 19000101 && value <= 20991231;
-    }
-
-    function isValidRole(value) {
-      return value in ["collector", "admin"];
-    }
-
-    function isValidRolesArray(value) {
-      return value is list &&
-        value.size() > 0 &&
-        value.size() <= 2 &&
-        value.hasOnly(["collector", "admin"]);
-    }
-
-    function hasOnlyKeys(allowedKeys) {
-      return request.resource.data.keys().hasOnly(allowedKeys);
-    }
-
-    function isValidLocationBodyParts(value) {
-      return value is map &&
-        value.keys().hasOnly([
-          "Hip",
-          "LeftKnee",
-          "LeftShoulder",
-          "Neck",
-          "RightKnee",
-          "RightShoulder"
-        ]) &&
-        value.Hip is int && value.Hip >= 0 &&
-        value.LeftKnee is int && value.LeftKnee >= 0 &&
-        value.LeftShoulder is int && value.LeftShoulder >= 0 &&
-        value.Neck is int && value.Neck >= 0 &&
-        value.RightKnee is int && value.RightKnee >= 0 &&
-        value.RightShoulder is int && value.RightShoulder >= 0;
-    }
-
+    // 개인정보가 들어 있는 컬렉션.
     match /users/{userId} {
-      allow read: if isSignedIn();
-
-      allow create: if
-        isSignedIn() &&
-        hasOnlyKeys([
-          "Name",
-          "NameNormalized",
-          "BirthDate",
-          "Gender",
-          "ConsentAgreed",
-          "ConsentAt",
-          "Role",
-          "Roles",
-          "UserNumber",
-          "MemberCode",
-          "AuthUid",
-          "CreatedAt",
-          "UpdatedAt"
-        ]) &&
-        isNonEmptyString(request.resource.data.Name) &&
-        isNonEmptyString(request.resource.data.NameNormalized) &&
-        isValidBirthDate(request.resource.data.BirthDate) &&
-        isValidGender(request.resource.data.Gender) &&
-        request.resource.data.ConsentAgreed is bool &&
-        request.resource.data.Role == "collector" &&
-        isValidRolesArray(request.resource.data.Roles) &&
-        request.resource.data.Roles.hasOnly(["collector"]) &&
-        request.resource.data.UserNumber is int &&
-        isNonEmptyString(request.resource.data.MemberCode) &&
-        request.resource.data.AuthUid is string;
-
-      allow update: if
-        isSignedIn() &&
-        resource.data.Role == request.resource.data.Role &&
-        resource.data.Name == request.resource.data.Name &&
-        resource.data.NameNormalized == request.resource.data.NameNormalized &&
-        resource.data.BirthDate == request.resource.data.BirthDate &&
-        resource.data.Gender == request.resource.data.Gender &&
-        resource.data.ConsentAgreed == request.resource.data.ConsentAgreed &&
-        resource.data.ConsentAt == request.resource.data.ConsentAt &&
-        resource.data.CreatedAt == request.resource.data.CreatedAt &&
-        isValidRole(request.resource.data.Role) &&
-        isValidRolesArray(request.resource.data.Roles) &&
-        request.resource.data.UserNumber is int &&
-        isNonEmptyString(request.resource.data.MemberCode) &&
-        request.resource.data.AuthUid is string;
-
-      allow delete: if false;
+      allow read, write: if false;
     }
 
     match /locationParticipants/{documentId} {
-      allow read: if isSignedIn();
-
-      allow create: if
-        isSignedIn() &&
-        hasOnlyKeys([
-          "UserId",
-          "UserDocId",
-          "UserNumber",
-          "MemberCode",
-          "Name",
-          "BirthDate",
-          "Gender",
-          "Location",
-          "LocationDocId",
-          "SiteCode",
-          "PostureType",
-          "PostureCode",
-          "CreatedAt",
-          "UpdatedAt"
-        ]) &&
-        isNonEmptyString(request.resource.data.UserId) &&
-        (!("UserDocId" in request.resource.data) || request.resource.data.UserDocId is string) &&
-        request.resource.data.UserNumber is int &&
-        isNonEmptyString(request.resource.data.MemberCode) &&
-        isNonEmptyString(request.resource.data.Name) &&
-        isValidBirthDate(request.resource.data.BirthDate) &&
-        isValidGender(request.resource.data.Gender) &&
-        isNonEmptyString(request.resource.data.Location) &&
-        isNonEmptyString(request.resource.data.LocationDocId) &&
-        isNonEmptyString(request.resource.data.SiteCode) &&
-        request.resource.data.PostureType in ["correct", "incorrect"] &&
-        request.resource.data.PostureCode in ["0", "1"];
-
-      allow update, delete: if false;
+      allow read, write: if false;
     }
 
     match /collectionSessions/{documentId} {
-      allow read: if isSignedIn();
-
-      allow create: if
-        isSignedIn() &&
-        hasOnlyKeys([
-          "UserId",
-          "UserDocId",
-          "UserNumber",
-          "MemberCode",
-          "Name",
-          "BirthDate",
-          "Gender",
-          "Location",
-          "LocationDocId",
-          "SiteCode",
-          "BodyPart",
-          "BodyPartCode",
-          "BodyPartLabel",
-          "PostureType",
-          "PostureCode",
-          "FileName",
-          "MimeType",
-          "FileSize",
-          "DurationMs",
-          "SourceType",
-          "DepthEnabled",
-          "DepthFrameCount",
-          "DepthRawFileName",
-          "DepthIndexFileName",
-          "DepthMetadataFileName",
-          "DepthRawSize",
-          "CreatedAt"
-        ]) &&
-        isNonEmptyString(request.resource.data.UserId) &&
-        (!("UserDocId" in request.resource.data) || request.resource.data.UserDocId is string) &&
-        request.resource.data.UserNumber is int &&
-        isNonEmptyString(request.resource.data.MemberCode) &&
-        isNonEmptyString(request.resource.data.Name) &&
-        isValidBirthDate(request.resource.data.BirthDate) &&
-        isValidGender(request.resource.data.Gender) &&
-        isNonEmptyString(request.resource.data.Location) &&
-        isNonEmptyString(request.resource.data.LocationDocId) &&
-        isNonEmptyString(request.resource.data.SiteCode) &&
-        isNonEmptyString(request.resource.data.BodyPart) &&
-        isNonEmptyString(request.resource.data.BodyPartCode) &&
-        isNonEmptyString(request.resource.data.BodyPartLabel) &&
-        request.resource.data.PostureType in ["correct", "incorrect"] &&
-        request.resource.data.PostureCode in ["0", "1"] &&
-        isNonEmptyString(request.resource.data.FileName) &&
-        isNonEmptyString(request.resource.data.MimeType) &&
-        request.resource.data.FileSize is int &&
-        request.resource.data.DurationMs is int &&
-        request.resource.data.SourceType in ["browser", "realsense"] &&
-        request.resource.data.DepthEnabled is bool &&
-        request.resource.data.DepthFrameCount is int &&
-        request.resource.data.DepthFrameCount >= 0 &&
-        request.resource.data.DepthRawFileName is string &&
-        request.resource.data.DepthIndexFileName is string &&
-        request.resource.data.DepthMetadataFileName is string &&
-        request.resource.data.DepthRawSize is int &&
-        request.resource.data.DepthRawSize >= 0;
-
-      allow update, delete: if false;
+      allow read, write: if false;
     }
 
+    // 서버 전용 보조 데이터.
     match /systemCounters/{documentId} {
-      allow read: if isSignedIn();
-
-      allow create: if
-        isSignedIn() &&
-        documentId == "users" &&
-        hasOnlyKeys(["NextUserNumber"]) &&
-        request.resource.data.NextUserNumber is int &&
-        request.resource.data.NextUserNumber >= 1;
-
-      allow update: if
-        isSignedIn() &&
-        documentId == "users" &&
-        hasOnlyKeys(["NextUserNumber"]) &&
-        request.resource.data.NextUserNumber is int &&
-        resource.data.NextUserNumber is int &&
-        request.resource.data.NextUserNumber == resource.data.NextUserNumber + 1;
-
-      allow delete: if false;
+      allow read, write: if false;
     }
 
     match /locations/{documentId} {
-      allow read: if isSignedIn();
-      allow create, update: if
-        isSignedIn() &&
-        hasOnlyKeys([
-          "Name",
-          "DisplayName",
-          "SiteCode",
-          "BodyParts",
-          "ConsentCount",
-          "SessionCount",
-          "UpdatedAt"
-        ]) &&
-        isNonEmptyString(request.resource.data.Name) &&
-        isNonEmptyString(request.resource.data.DisplayName) &&
-        isNonEmptyString(request.resource.data.SiteCode) &&
-        isValidLocationBodyParts(request.resource.data.BodyParts) &&
-        request.resource.data.ConsentCount is int &&
-        request.resource.data.ConsentCount >= 0 &&
-        request.resource.data.SessionCount is int &&
-        request.resource.data.SessionCount >= 0 &&
-        (
-          !resource.exists() ||
-          (
-            resource.data.Name == request.resource.data.Name &&
-            resource.data.DisplayName == request.resource.data.DisplayName &&
-            resource.data.SiteCode == request.resource.data.SiteCode &&
-            request.resource.data.ConsentCount >= resource.data.ConsentCount &&
-            request.resource.data.SessionCount >= resource.data.SessionCount &&
-            request.resource.data.BodyParts.Hip >= resource.data.BodyParts.Hip &&
-            request.resource.data.BodyParts.LeftKnee >= resource.data.BodyParts.LeftKnee &&
-            request.resource.data.BodyParts.LeftShoulder >= resource.data.BodyParts.LeftShoulder &&
-            request.resource.data.BodyParts.Neck >= resource.data.BodyParts.Neck &&
-            request.resource.data.BodyParts.RightKnee >= resource.data.BodyParts.RightKnee &&
-            request.resource.data.BodyParts.RightShoulder >= resource.data.BodyParts.RightShoulder
-          )
-        );
-      allow delete: if false;
+      allow read, write: if false;
     }
 
+    match /rateLimits/{documentId} {
+      allow read, write: if false;
+    }
+
+    // 기존 데이터 보정 기록: 조회는 /api/admin/dashboard-data, 추가·삭제는 /api/admin/adjustments 로만.
     match /legacyAdjustments/{documentId} {
-      allow read: if isSignedIn();
-
-      allow create: if
-        isSignedIn() &&
-        hasOnlyKeys([
-          "Location",
-          "LocationDocId",
-          "SiteCode",
-          "BodyPart",
-          "BodyPartCode",
-          "BodyPartLabel",
-          "PostureType",
-          "PostureCode",
-          "PostureLabel",
-          "SessionDelta",
-          "ConsentDelta",
-          "Note",
-          "TargetUserId",
-          "TargetUserName",
-          "TargetUserNumber",
-          "TargetMemberCode",
-          "CreatedByName",
-          "CreatedByUserId",
-          "CreatedAt",
-          "UpdatedAt"
-        ]) &&
-        isNonEmptyString(request.resource.data.Location) &&
-        isNonEmptyString(request.resource.data.LocationDocId) &&
-        isNonEmptyString(request.resource.data.SiteCode) &&
-        isNonEmptyString(request.resource.data.BodyPart) &&
-        isNonEmptyString(request.resource.data.BodyPartCode) &&
-        isNonEmptyString(request.resource.data.BodyPartLabel) &&
-        request.resource.data.PostureType in ["correct", "incorrect"] &&
-        request.resource.data.PostureCode in ["0", "1"] &&
-        isNonEmptyString(request.resource.data.PostureLabel) &&
-        request.resource.data.SessionDelta is int &&
-        request.resource.data.SessionDelta >= 0 &&
-        request.resource.data.ConsentDelta is int &&
-        request.resource.data.ConsentDelta >= 0 &&
-        request.resource.data.Note is string &&
-        isNonEmptyString(request.resource.data.TargetUserId) &&
-        isNonEmptyString(request.resource.data.TargetUserName) &&
-        request.resource.data.TargetUserNumber is int &&
-        request.resource.data.TargetUserNumber >= 1 &&
-        request.resource.data.TargetMemberCode is string &&
-        isNonEmptyString(request.resource.data.CreatedByName) &&
-        isNonEmptyString(request.resource.data.CreatedByUserId);
-
-      allow update: if false;
-      allow delete: if isSignedIn();
+      allow read, write: if false;
     }
 
+    // 그 밖의 모든 경로.
     match /{document=**} {
       allow read, write: if false;
     }

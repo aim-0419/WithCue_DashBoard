@@ -1,6 +1,5 @@
-import { collection, getDocs } from "firebase/firestore";
 import { BODY_PART_OPTIONS, LOCATION_META } from "./collection-service.js";
-import { getFirebaseDb, waitForFirebaseAuthReady } from "./firebase-client.js";
+import { apiRequest } from "./firebase-client.js";
 
 const LOCATION_ORDER = ["jangdeok", "hyocheon", "aim"];
 const POSTURE_TYPES = ["all", "correct", "incorrect"];
@@ -180,39 +179,70 @@ function aggregateDashboard(userDocs, participantDocs, sessionDocs, adjustmentDo
   };
 }
 
+function toMillisLike(value) {
+  return Number.isFinite(value) ? { toMillis: () => value } : undefined;
+}
+
+// 서버 응답 객체를 Firestore 스냅샷 문서처럼({ id, data() }) 감싸 aggregateDashboard를 그대로 쓴다.
+// adjustments의 CreatedAtMs/UpdatedAtMs는 CreatedAt/UpdatedAt.toMillis()로 다시 노출해 정렬을 유지한다.
+function toSnapshotLikeDocs(items, { withTimestamps = false } = {}) {
+  return (Array.isArray(items) ? items : []).map((item) => {
+    const { id, ...fields } = item || {};
+
+    if (withTimestamps) {
+      const createdAt = toMillisLike(fields.CreatedAtMs);
+      const updatedAt = toMillisLike(fields.UpdatedAtMs);
+
+      if (createdAt) {
+        fields.CreatedAt = createdAt;
+      }
+
+      if (updatedAt) {
+        fields.UpdatedAt = updatedAt;
+      }
+    }
+
+    return {
+      id: String(id || ""),
+      data: () => fields,
+    };
+  });
+}
+
 export async function getDashboardData() {
   try {
-    await waitForFirebaseAuthReady();
+    const result = await apiRequest("/api/admin/dashboard-data", { method: "GET" });
 
-    const db = getFirebaseDb();
-    const [userSnapshot, participantSnapshot, sessionSnapshot, adjustmentSnapshot] = await Promise.all([
-      getDocs(collection(db, "users")),
-      getDocs(collection(db, "locationParticipants")),
-      getDocs(collection(db, "collectionSessions")),
-      getDocs(collection(db, "legacyAdjustments")),
-    ]);
+    if (!result.ok) {
+      return {
+        ...createEmptyDashboardData(),
+        source: "firebase-error",
+        errorMessage: result.message || "대시보드 데이터를 불러오지 못했습니다.",
+        errorCode: result.code || "",
+      };
+    }
+
+    const userDocs = toSnapshotLikeDocs(result.users);
+    const participantDocs = toSnapshotLikeDocs(result.participants);
+    const sessionDocs = toSnapshotLikeDocs(result.sessions);
+    const adjustmentDocs = toSnapshotLikeDocs(result.adjustments, { withTimestamps: true });
 
     if (
-      userSnapshot.empty &&
-      participantSnapshot.empty &&
-      sessionSnapshot.empty &&
-      adjustmentSnapshot.empty
+      userDocs.length === 0 &&
+      participantDocs.length === 0 &&
+      sessionDocs.length === 0 &&
+      adjustmentDocs.length === 0
     ) {
       return createEmptyDashboardData();
     }
 
-    return aggregateDashboard(
-      userSnapshot.docs,
-      participantSnapshot.docs,
-      sessionSnapshot.docs,
-      adjustmentSnapshot.docs,
-    );
+    return aggregateDashboard(userDocs, participantDocs, sessionDocs, adjustmentDocs);
   } catch (error) {
     return {
       ...createEmptyDashboardData(),
       source: "firebase-error",
-      errorMessage: error.message,
-      errorCode: error.code || "",
+      errorMessage: error?.message || "",
+      errorCode: error?.code || "",
     };
   }
 }

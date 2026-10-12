@@ -80,7 +80,14 @@ function ConsentField({ agreed, onChange }) {
   );
 }
 
-function AuthForm({ mode, onLogin, onSignup }) {
+const AUTH_MODES = ["login", "signup", "admin-login", "link-profile"];
+
+// 알 수 없는 mode는 로그인으로 취급함(onSignup이 잘못 불리지 않도록).
+function normalizeAuthMode(mode) {
+  return AUTH_MODES.includes(mode) ? mode : "login";
+}
+
+function AuthForm({ mode, onLogin, onSignup, onLinkProfile }) {
   const [form, setForm] = useState({
     name: "",
     birthDate: "",
@@ -91,17 +98,16 @@ function AuthForm({ mode, onLogin, onSignup }) {
   const [errorMessage, setErrorMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  const isLogin = mode === "login" || mode === "admin-login";
-  const isAdminLogin = mode === "admin-login";
   const isSignup = mode === "signup";
+  const isLinkProfile = mode === "link-profile";
 
   const submitLabel = useMemo(() => {
-    if (isAdminLogin) {
-      return "관리자 로그인";
+    if (isLinkProfile) {
+      return "회원 정보 연결";
     }
 
-    return isLogin ? "로그인" : "회원가입";
-  }, [isAdminLogin, isLogin]);
+    return isSignup ? "회원가입" : "로그인";
+  }, [isLinkProfile, isSignup]);
 
   // 입력 중인 날짜를 제출 형식과 분리해 안내함.
   const birthDatePreview = useMemo(() => {
@@ -143,7 +149,15 @@ function AuthForm({ mode, onLogin, onSignup }) {
     setSubmitting(true);
 
     try {
-      const result = isLogin ? await onLogin?.(payload, mode) : await onSignup?.(payload);
+      let result;
+
+      if (isSignup) {
+        result = await onSignup?.(payload);
+      } else if (isLinkProfile) {
+        result = await onLinkProfile?.(payload);
+      } else {
+        result = await onLogin?.(payload, "login");
+      }
 
       if (result?.ok === false) {
         setErrorMessage(result.message || `${submitLabel} 요청에 실패했습니다.`);
@@ -198,61 +212,144 @@ function AuthForm({ mode, onLogin, onSignup }) {
 
       {errorMessage ? <p className="auth-message auth-message--error">{errorMessage}</p> : null}
 
-      <button type="submit" className="auth-submit">
+      <button type="submit" className="auth-submit" disabled={submitting}>
         {submitting ? "처리 중..." : submitLabel}
       </button>
     </form>
   );
 }
 
-export function AuthPage({ mode = "login", notice = "", onLogin, onSignup }) {
+function AdminGoogleLogin({ onAdminGoogleLogin }) {
+  const [errorMessage, setErrorMessage] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function handleClick() {
+    setErrorMessage("");
+    setSubmitting(true);
+
+    try {
+      const result = await onAdminGoogleLogin?.();
+
+      if (result?.ok === false) {
+        setErrorMessage(result.message || "관리자 로그인에 실패했습니다.");
+      }
+    } catch (error) {
+      setErrorMessage(error?.message || "관리자 로그인 처리 중 오류가 발생했습니다.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="auth-form">
+      {errorMessage ? <p className="auth-message auth-message--error">{errorMessage}</p> : null}
+
+      <button type="button" className="auth-submit" onClick={handleClick} disabled={submitting}>
+        {submitting ? "로그인 창을 확인해 주세요..." : "Google 계정으로 관리자 로그인"}
+      </button>
+    </div>
+  );
+}
+
+function getModeText(mode) {
+  if (mode === "admin-login") {
+    return {
+      kicker: "ADMIN ACCESS",
+      title: "관리자 로그인",
+      description: "관리자 계정으로 로그인하면 대시보드에 바로 접근할 수 있습니다.",
+    };
+  }
+
+  if (mode === "link-profile") {
+    return {
+      kicker: "LINK PROFILE",
+      title: "수집 참여자 정보 연결",
+      description: "관리자 계정으로 수집 화면을 쓰려면 본인의 회원 정보를 한 번 연결합니다.",
+    };
+  }
+
+  if (mode === "signup") {
+    return {
+      kicker: "SIGN UP",
+      title: "회원가입",
+      description: "개인정보 동의 후 회원가입을 진행합니다.",
+    };
+  }
+
+  return {
+    kicker: "LOGIN",
+    title: "로그인",
+    description: "회원가입한 이름, 생년월일, 성별을 입력하면 수집 화면으로 이동합니다.",
+  };
+}
+
+export function AuthPage({
+  mode: rawMode = "login",
+  notice = "",
+  onLogin,
+  onSignup,
+  onAdminGoogleLogin,
+  onLinkProfile,
+  onCancelLink,
+}) {
+  const mode = normalizeAuthMode(rawMode);
   const isLogin = mode === "login";
   const isAdminLogin = mode === "admin-login";
+  const isLinkProfile = mode === "link-profile";
+  const modeText = getModeText(mode);
 
   return (
     <main className="dashboard dashboard--auth">
       <section className="command-board command-board--auth">
         <div className="auth-shell">
           <section className="auth-card">
-            {/* 로그인과 회원가입 화면을 한 카드 안에서 전환함. */}
-            <div className="auth-switch">
-              <a
-                href={buildQuery("login")}
-                className={`auth-switch__button${isLogin ? " is-active" : ""}`}
-              >
-                로그인
-              </a>
-              <a
-                href={buildQuery("signup")}
-                className={`auth-switch__button${mode === "signup" ? " is-active" : ""}`}
-              >
-                회원가입
-              </a>
-            </div>
+            {/* 로그인과 회원가입 화면을 한 카드 안에서 전환함. 연결 화면은 관리자 전용이라 숨김. */}
+            {isLinkProfile ? null : (
+              <div className="auth-switch">
+                <a
+                  href={buildQuery("login")}
+                  className={`auth-switch__button${isLogin ? " is-active" : ""}`}
+                >
+                  로그인
+                </a>
+                <a
+                  href={buildQuery("signup")}
+                  className={`auth-switch__button${mode === "signup" ? " is-active" : ""}`}
+                >
+                  회원가입
+                </a>
+              </div>
+            )}
 
             <div className="auth-card__inner">
-              <p className="info-card__kicker">
-                {isAdminLogin ? "ADMIN ACCESS" : mode === "signup" ? "SIGN UP" : "LOGIN"}
-              </p>
-              <h1 className="auth-form-title">
-                {isAdminLogin ? "관리자 로그인" : mode === "signup" ? "회원가입" : "로그인"}
-              </h1>
-              <p className="auth-form-description">
-                {isAdminLogin
-                  ? "관리자 계정으로 로그인하면 대시보드에 바로 접근할 수 있습니다."
-                  : mode === "signup"
-                    ? "개인정보 동의 후 회원가입을 진행합니다."
-                    : "회원가입한 이름, 생년월일, 성별을 입력하면 수집 화면으로 이동합니다."}
-              </p>
+              <p className="info-card__kicker">{modeText.kicker}</p>
+              <h1 className="auth-form-title">{modeText.title}</h1>
+              <p className="auth-form-description">{modeText.description}</p>
 
               {notice ? <p className="auth-message auth-message--notice">{notice}</p> : null}
 
-              <AuthForm mode={mode} onLogin={onLogin} onSignup={onSignup} />
+              {isAdminLogin ? (
+                <AdminGoogleLogin onAdminGoogleLogin={onAdminGoogleLogin} />
+              ) : (
+                <AuthForm
+                  key={mode}
+                  mode={mode}
+                  onLogin={onLogin}
+                  onSignup={onSignup}
+                  onLinkProfile={onLinkProfile}
+                />
+              )}
 
               {isAdminLogin ? (
                 <a href={buildQuery("login")} className="auth-admin-link">
                   일반 수집 로그인으로 돌아가기
                 </a>
+              ) : null}
+
+              {isLinkProfile ? (
+                <button type="button" className="auth-admin-link" onClick={onCancelLink}>
+                  대시보드로 돌아가기
+                </button>
               ) : null}
             </div>
           </section>

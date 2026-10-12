@@ -19,3 +19,15 @@ frontend/.env.*.local
 Desktop/Data_Auto/
 build/
 release/
+
+# Firebase 서비스 계정 키는 절대 커밋하지 않음 (Vercel 환경변수로만 주입)
+*service-account*.json
+serviceAccountKey.json
+.env.server
+.env.server.local
+
+# Firebase 에뮬레이터 산출물
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+.firebase/

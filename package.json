@@ -12,18 +12,21 @@
     "build": "vite build",
     "preview": "vite preview",
     "serve": "vite",
-    "locations:sync": "node ./backend/scripts/sync-locations.mjs",
-    "firestore:list": "node ./backend/scripts/firestore-tools.mjs list",
-    "firestore:get:company": "node ./backend/scripts/firestore-tools.mjs get Company",
-    "admin:add": "powershell -ExecutionPolicy Bypass -File ./scripts/add-admin-user.ps1"
+    "dev:api": "node ./scripts/dev-api-server.mjs",
+    "emulators": "npx firebase-tools@14 emulators:start --only auth,firestore --project withcuedashboard",
+    "test:rules": "npx firebase-tools@14 emulators:exec --only firestore --project demo-withcue-rules --config firebase.rules-test.json \"node --test tests/firestore.rules.test.mjs\"",
+    "test:api": "npx firebase-tools@14 emulators:exec --only auth,firestore --project withcuedashboard \"node tests/run-api-e2e.mjs\"",
+    "test": "npm run test:rules && npm run test:api"
   },
   "dependencies": {
     "firebase": "^12.11.0",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "react-dom": "^19.1.1",
+    "firebase-admin": "^13.4.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.0.2",
-    "vite": "^7.1.7"
+    "vite": "^7.1.7",
+    "@firebase/rules-unit-testing": "^5.0.2"
   }
 }
