@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-const SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 function formatLogoutCountdown(remainingSeconds) {
   const safeSeconds = Math.max(0, remainingSeconds);
@@ -9,13 +9,13 @@ function formatLogoutCountdown(remainingSeconds) {
   return `자동 로그아웃까지 ${minutes}:${seconds}`;
 }
 
-export function useIdleLogout({ enabled, onLogout }) {
+export function useIdleLogout({ enabled, onLogout, timeoutMs = DEFAULT_IDLE_TIMEOUT_MS }) {
   const [remainingSeconds, setRemainingSeconds] = useState(0);
   const idleDeadlineRef = useRef(0);
   const idleLogoutPendingRef = useRef(false);
 
   useEffect(() => {
-    // 수집 세션에서만 무반응 기준 시간을 새로 잡음.
+    // 활성화된 세션에서만 무반응 기준 시간을 새로 잡음.
     if (!enabled) {
       idleDeadlineRef.current = 0;
       idleLogoutPendingRef.current = false;
@@ -24,11 +24,11 @@ export function useIdleLogout({ enabled, onLogout }) {
     }
 
     const resetIdleDeadline = () => {
-      idleDeadlineRef.current = Date.now() + SESSION_IDLE_TIMEOUT_MS;
+      idleDeadlineRef.current = Date.now() + timeoutMs;
     };
 
     resetIdleDeadline();
-    setRemainingSeconds(Math.ceil(SESSION_IDLE_TIMEOUT_MS / 1000));
+    setRemainingSeconds(Math.ceil(timeoutMs / 1000));
 
     const activityEvents = ["pointerdown", "mousemove", "keydown", "scroll", "touchstart"];
     const handleActivity = () => {
@@ -48,7 +48,7 @@ export function useIdleLogout({ enabled, onLogout }) {
         window.removeEventListener(eventName, handleActivity),
       );
     };
-  }, [enabled]);
+  }, [enabled, timeoutMs]);
 
   useEffect(() => {
     // 1초마다 남은 시간을 갱신하고 만료 시 로그아웃함.

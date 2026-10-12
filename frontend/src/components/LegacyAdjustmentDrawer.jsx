@@ -244,6 +244,7 @@ export function LegacyAdjustmentDrawer({
           <input
             className="auth-input"
             type="text"
+            maxLength={500}
             value={form.note}
             onChange={(event) => updateField("note", event.target.value)}
           />

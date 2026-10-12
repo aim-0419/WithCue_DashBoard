@@ -701,6 +701,26 @@ body::before {
   text-decoration: none;
 }
 
+button.auth-admin-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.auth-submit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.auth-boot {
+  margin: 0;
+  color: var(--muted);
+  text-align: center;
+}
+
 .posture-select-card {
   width: min(100%, 560px);
 }
